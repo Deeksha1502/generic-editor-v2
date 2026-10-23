@@ -4,6 +4,7 @@ import type { ContentData, EditorContext, RawTranscript } from '../types';
 import { getMimeTypeLabel, t } from '../i18n/i18n';
 import { FileIcon } from '../icons';
 import { isVideoMimeType } from '../constants';
+import { ecmlBodyForUser } from '../dynamicAssessDraw';
 
 interface PlayerTranscript {
   language: string;
@@ -32,10 +33,19 @@ function mapRawTranscripts(raw: RawTranscript[]): PlayerTranscript[] {
     }));
 }
 
+/** The ECML renderer reads the lesson from `data` (as the portal's EcmlPlayerService passes metadata.body); the API returns the body JSON-stringified. */
+export function rendererData(body: unknown): unknown {
+  if (body && typeof body === 'object') return body;
+  if (typeof body === 'string' && body.trim()) {
+    try { return JSON.parse(body); } catch { return body; }
+  }
+  return {};
+}
+
 /** Preview via the legacy ekstep content renderer (all mimeTypes through its coreplugins), loaded in an iframe and driven via its global `initializePreview()`. */
 const RendererPreview: React.FC<{
-  content: ContentData; context: EditorContext; previewUrl: string; previewConfig: Record<string, unknown>;
-}> = ({ content, context, previewUrl, previewConfig }) => {
+  content: ContentData; context: EditorContext; previewUrl: string; previewConfig: Record<string, unknown>; isDynamicAssess?: boolean;
+}> = ({ content, context, previewUrl, previewConfig, isDynamicAssess = false }) => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const src = `${previewUrl}${previewUrl.includes('?') ? '&' : '?'}webview=true`;
 
@@ -44,6 +54,13 @@ const RendererPreview: React.FC<{
       | (Window & { initializePreview?: (cfg: unknown) => void })
       | null;
     if (!win || typeof win.initializePreview !== 'function') return;
+    const rawBody = (content as Record<string, unknown>).body;
+    // Only Dynamic Assess renders from its generated body (the user's own draw, never the whole pool); other content keeps the renderer's own loading.
+    const data = isDynamicAssess ? ecmlBodyForUser(rendererData(rawBody), content.identifier, context.user?.id) : {};
+    // metadata.body carries the same draw, like the portal's ecmlForLearner, so the full pool never reaches the renderer.
+    const metadata = isDynamicAssess && rawBody
+      ? { ...content, body: typeof rawBody === 'string' && data && typeof data === 'object' ? JSON.stringify(data) : data }
+      : content;
     win.initializePreview({
       context: {
         mode: 'edit',
@@ -57,8 +74,8 @@ const RendererPreview: React.FC<{
         partner: [],
       },
       config: previewConfig,
-      metadata: content,
-      data: {},
+      metadata,
+      data,
     });
   };
 
@@ -104,8 +121,10 @@ const EditorPreview: React.FC<{ ed: EditorController; context: EditorContext }> 
           </div>
         ) : (
           <RendererPreview
-            key={`${content.identifier}-${content.artifactUrl ?? ''}-${transcriptsKey}`}
+            // A regenerated ECML body has no new artifactUrl, so lastUpdatedOn (set by the job) is what remounts the player onto it.
+            key={`${content.identifier}-${content.artifactUrl ?? ''}-${transcriptsKey}${ed.isDynamicAssess ? `-${String(content.lastUpdatedOn ?? '')}` : ''}`}
             content={previewMetadata}
+            isDynamicAssess={ed.isDynamicAssess}
             context={context}
             previewUrl={previewUrl}
             previewConfig={previewConfig}

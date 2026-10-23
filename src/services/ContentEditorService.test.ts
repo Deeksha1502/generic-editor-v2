@@ -22,6 +22,131 @@ describe('normalizeContent', () => {
   });
 });
 
+describe('ContentEditorService.readFormFields subType resolution', () => {
+  it('requests the generic "resource" subType for ordinary content categories (negative)', async () => {
+    const savedFetch = globalThis.fetch;
+    let capturedBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body));
+      return { ok: true, json: async () => ({ responseCode: 'OK', result: { form: { data: { fields: [] } } } }) };
+    }) as unknown as typeof fetch;
+    try {
+      await new ContentEditorService().readFormFields('Learning Resource', 'save');
+      expect((capturedBody?.request as Record<string, unknown>).subType).toBe('resource');
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it('requests its own subType for Dynamic Course Assessment content, not the generic one (positive)', async () => {
+    const savedFetch = globalThis.fetch;
+    let capturedBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body));
+      return { ok: true, json: async () => ({ responseCode: 'OK', result: { form: { data: { fields: [] } } } }) };
+    }) as unknown as typeof fetch;
+    try {
+      await new ContentEditorService().readFormFields('Dynamic Course Assessment', 'save');
+      expect((capturedBody?.request as Record<string, unknown>).subType).toBe('Dynamic Course Assessment');
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+});
+
+describe('ContentEditorService.refreshContentBody', () => {
+  it('sends lastPublishedBy under request.content, which the refresh-body API requires (positive)', async () => {
+    const savedFetch = globalThis.fetch;
+    let captured: { url?: string; body?: Record<string, unknown> } = {};
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      captured = { url, body: JSON.parse(String(init?.body)) };
+      return { ok: true, json: async () => ({ responseCode: 'OK', result: {} }) };
+    }) as unknown as typeof fetch;
+    try {
+      await new ContentEditorService().refreshContentBody('do_1', 'u1');
+      expect(captured.url).toContain('content/v3/refresh/body/do_1');
+      expect(captured.body).toEqual({ request: { content: { lastPublishedBy: 'u1' } } });
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+});
+
+describe('ContentEditorService.searchSkillPoolCounts', () => {
+  it('counts Live AssessmentItems per skill with the same filters as knowlg-service (no channel, any level) (positive)', async () => {
+    const savedFetch = globalThis.fetch;
+    const filters: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const f = JSON.parse(String(init?.body)).request.filters;
+      filters.push(f);
+      return { ok: true, json: async () => ({ responseCode: 'OK', result: { count: f.skill[0] === 'Azure' ? 2 : 30 } }) };
+    }) as unknown as typeof fetch;
+    try {
+      expect(await new ContentEditorService().searchSkillPoolCounts(['Physics', 'Azure'])).toEqual({ Physics: 30, Azure: 2 });
+      for (const f of filters) {
+        expect(f).toMatchObject({ status: ['Live'], objectType: 'AssessmentItem' });
+        expect(f).not.toHaveProperty('channel');
+        expect(f).not.toHaveProperty('qlevel');
+      }
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+});
+
+describe('ContentEditorService.searchAssessmentItemBucketCounts', () => {
+  it('counts Live AssessmentItems per skill x level with channel and category, like the job (positive)', async () => {
+    const savedFetch = globalThis.fetch;
+    const filters: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const f = JSON.parse(String(init?.body)).request.filters;
+      filters.push(f);
+      const n = { EASY: 4, MEDIUM: 2, DIFFICULT: 1 }[f.qlevel as string] ?? 0;
+      return { ok: true, json: async () => ({ responseCode: 'OK', result: { count: f.topic[0] === 'A' ? n : n * 10 } }) };
+    }) as unknown as typeof fetch;
+    try {
+      const counts = await new ContentEditorService().searchAssessmentItemBucketCounts(['A', 'B'], 'ch1', 'topic');
+      expect(counts).toEqual({ A: { E: 4, M: 2, D: 1 }, B: { E: 40, M: 20, D: 10 } });
+      expect(filters).toHaveLength(6);
+      for (const f of filters) expect(f).toMatchObject({ status: ['Live'], objectType: 'AssessmentItem', channel: 'ch1' });
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it('makes no calls when no skills are given (negative)', async () => {
+    const savedFetch = globalThis.fetch;
+    let called = false;
+    globalThis.fetch = (async () => { called = true; return { ok: true, json: async () => ({}) }; }) as unknown as typeof fetch;
+    try {
+      expect(await new ContentEditorService().searchAssessmentItemBucketCounts([])).toEqual({});
+      expect(called).toBe(false);
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+});
+describe('ContentEditorService.readContent body field', () => {
+  const capture = async (call: (s: ContentEditorService) => Promise<unknown>) => {
+    const savedFetch = globalThis.fetch;
+    let capturedUrl = '';
+    globalThis.fetch = (async (url: string) => {
+      capturedUrl = url;
+      return { ok: true, json: async () => ({ responseCode: 'OK', result: { content: { identifier: 'do_1' } } }) };
+    }) as unknown as typeof fetch;
+    try { await call(new ContentEditorService()); } finally { globalThis.fetch = savedFetch; }
+    return new URL(capturedUrl, 'http://x').searchParams.get('fields')?.split(',') ?? [];
+  };
+
+  it('does not request body by default, so ordinary content reads what it always did (negative)', async () => {
+    expect(await capture((s) => s.readContent('do_1'))).not.toContain('body');
+  });
+
+  it('requests body only when asked, for Dynamic Assess (positive)', async () => {
+    expect(await capture((s) => s.readContent('do_1', 'edit', { withBody: true }))).toContain('body');
+  });
+});
+
 describe('ContentEditorService.readContent caching', () => {
   it('reads with cache: no-store - this page re-reads its own content right after mutating it (save/publish/reject)', async () => {
     const savedFetch = globalThis.fetch;

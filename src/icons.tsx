@@ -31,6 +31,12 @@ export const CloseIcon: React.FC<P> = ({ size = 13, className }) => (
 export const SendIcon: React.FC<P> = ({ size = 13, className }) => (
   <svg {...base(size)} className={className}><polyline points="22 2 11 13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
 );
+export const RefreshIcon: React.FC<P> = ({ size = 13, className }) => (
+  <svg {...base(size)} className={className}>
+    <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+  </svg>
+);
 export const PencilIcon: React.FC<P> = ({ size = 12, className }) => (
   <svg {...base(size)} className={className}>
     <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
@@ -53,6 +59,9 @@ export const ImageIcon: React.FC<P> = ({ size = 16, className }) => (
 );
 export const CheckIcon: React.FC<P> = ({ size = 15, className }) => (
   <svg {...base(size)} className={className}><polyline points="20 6 9 17 4 12" /></svg>
+);
+export const InfoIcon: React.FC<P> = ({ size = 16, className }) => (
+  <svg {...base(size)} className={className}><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
 );
 export const VideoIcon: React.FC<P> = ({ size = 16, className }) => (
   <svg {...base(size)} className={className}><rect x="2" y="2" width="20" height="20" rx="2" /><polygon points="10 8 16 12 10 16 10 8" /></svg>

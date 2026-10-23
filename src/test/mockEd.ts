@@ -29,6 +29,9 @@ export function mockService(over: Record<string, unknown> = {}): ContentEditorSe
   return {
     searchUsers: vi.fn().mockResolvedValue([]),
     searchImageAssets: vi.fn().mockResolvedValue([]),
+    searchAssessmentItemBucketCounts: vi.fn().mockImplementation(async (skills: string[]) => Object.fromEntries(skills.map((s) => [s, { E: 100, M: 100, D: 100 }]))),
+    searchSkillPoolCounts: vi.fn().mockImplementation(async (skills: string[]) => Object.fromEntries(skills.map((s) => [s, 100]))),
+    searchFrameworks: vi.fn().mockResolvedValue([]),
     uploadImageAsset: vi.fn().mockResolvedValue('https://cdn/img.png'),
     readForm: vi.fn().mockResolvedValue([]),
     readFormFields: vi.fn().mockResolvedValue([]),

@@ -2,6 +2,12 @@
 
 export const TELEMETRY_VERSION = '3.0';
 
+/** Dynamic Assess: each difficulty needs requested x this many Live questions; must match the backend's dynamicassess.multiplier. */
+export const DYNAMIC_ASSESS_POOL_MULTIPLIER = 3;
+
+/** Dynamic Assess: each selected skill must contribute at least this many questions; must match the backend's dynamicassess.minCriteria. */
+export const DYNAMIC_ASSESS_MIN_CRITERIA = 2;
+
 /** Default content category options shown in the upload content-type picker.
  *  Mirrors portal editorConfig.DEFAULT_PRIMARY_CATEGORIES (subset relevant to upload). */
 export const DEFAULT_PRIMARY_CATEGORIES = [

@@ -1,6 +1,9 @@
 /** ContentEditorService — backend abstraction for the editor; calls go to relative `/action/...` (proxied to knowledge-mw/Kong) by default, overridable via EditorConfig. */
 import type { ContentData, EditorContext, EditorConfig, FrameworkCategory, FormField, AssetItem, RawTranscript } from '../types';
 
+/** Keep in sync with useEditor.ts's DYNAMIC_ASSESS_CATEGORY (not imported: the modules don't otherwise depend on each other). */
+const DYNAMIC_ASSESS_ECML_CATEGORY = 'Dynamic Course Assessment';
+
 const DEFAULT_ENDPOINTS = {
   /* Versions verified against the portal's ContentService, the old generic editor, and the backend proxy; all hit /action → knowledge-mw. */
   create: 'content/v3/create',
@@ -28,6 +31,8 @@ const DEFAULT_ENDPOINTS = {
   transcriptReject: 'content/v4/enrichment/object/reject',
   /* v1, not v3 - only v1+enrich=all via the /portal/* proxy route is confirmed to return enrichment.transcripts (see readTranscripts()'s own comment). */
   transcriptsRead: 'content/v1/read',
+  /* Dynamic Assess — triggers the knowlg-publish job's pool-based question selection. */
+  refreshBody: 'content/v3/refresh/body',
 } as const;
 
 export type EndpointMap = Partial<typeof DEFAULT_ENDPOINTS>;
@@ -36,7 +41,9 @@ const READ_FIELDS = [
   'name', 'description', 'mimeType', 'contentType', 'primaryCategory', 'resourceType',
   'status', 'artifactUrl', 'streamingUrl', 'downloadUrl', 'appIcon', 'posterImage',
   'framework', 'board', 'medium', 'gradeLevel', 'subject', 'keywords', 'collaborators',
-  'createdBy', 'creator', 'versionKey', 'pkgVersion', 'rejectReasons', 'rejectComment',
+  'createdBy', 'creator', 'versionKey', 'pkgVersion', 'rejectReasons', 'rejectComment', 'channel',
+  /* Dynamic Assess fields (absent on other content); the knowlg-publish job sets totalQuestions and lastUpdatedOn. */
+  'skill', 'difficultyTarget', 'totalQuestions', 'lastUpdatedOn',
 ].join(',');
 
 function toArray(val: unknown): string[] | undefined {
@@ -64,6 +71,7 @@ export function normalizeContent(raw: Record<string, unknown>): ContentData {
     collaborators: toArray(raw.collaborators),
     rejectReasons: toArray(raw.rejectReasons),
     board: typeof raw.board === 'string' ? raw.board : toArray(raw.board)?.[0],
+    skill: toArray(raw.skill),
   } as ContentData;
 }
 
@@ -173,8 +181,10 @@ export class ContentEditorService {
   /** GET content/v3/read/{id}?mode=edit — no-store, since this page re-reads its own content right after
    *  mutating it; also sends Cache-Control: no-cache so an intermediary gateway cache (e.g. Kong's
    *  proxy-cache plugin, which honors this request header) doesn't serve a pre-mutation response. */
-  async readContent(contentId: string, mode = 'edit'): Promise<ContentData> {
-    const path = `${this.ep.read}/${encodeURIComponent(contentId)}?mode=${mode}&fields=${READ_FIELDS}`;
+  async readContent(contentId: string, mode = 'edit', opts: { withBody?: boolean } = {}): Promise<ContentData> {
+    // body is opt-in (only Dynamic Assess needs it), so other content reads exactly the fields it always did.
+    const fields = opts.withBody ? `${READ_FIELDS},body` : READ_FIELDS;
+    const path = `${this.ep.read}/${encodeURIComponent(contentId)}?mode=${mode}&fields=${fields}`;
     const result = await this.request<{ content: Record<string, unknown> }>('GET', path, undefined, {
       cache: 'no-store',
       headers: { 'Cache-Control': 'no-cache' },
@@ -198,6 +208,13 @@ export class ContentEditorService {
   async sendForReview(contentId: string): Promise<unknown> {
     return this.request('POST', `${this.ep.review}/${encodeURIComponent(contentId)}`, {
       request: { content: {} },
+    });
+  }
+
+  /** POST content/v3/refresh/body/{id}: queues pool-based question selection; the API rejects a blank lastPublishedBy, same body shape as publish. */
+  async refreshContentBody(contentId: string, lastPublishedBy: string): Promise<unknown> {
+    return this.request('POST', `${this.ep.refreshBody}/${encodeURIComponent(contentId)}`, {
+      request: { content: { lastPublishedBy } },
     });
   }
 
@@ -327,7 +344,7 @@ export class ContentEditorService {
 
   /** Fetches form field definitions for a content type + action, mirroring the old generic editor's payload, and returns them sorted by `index`. */
   async readFormFields(
-    _subtype: string,
+    subtype: string,
     action: 'save' | 'review' | 'publish',
     opts: { framework?: string; rootOrgId?: string } = {},
   ): Promise<FormField[]> {
@@ -335,9 +352,8 @@ export class ContentEditorService {
     const result = await this.request<FormResp>('POST', this.ep.form, {
       request: {
         type: 'content',
-        // Form config is keyed on a fixed subType ('resource'), not the content's
-        // primaryCategory — matches the old generic editor's form/read call.
-        subType: 'resource',
+        // Fixed 'resource' subType like the old editor, except Dynamic Assess, whose fields live on a form under its own category.
+        subType: subtype === DYNAMIC_ASSESS_ECML_CATEGORY ? subtype : 'resource',
         action,
         framework: opts.framework ?? '*',
         rootOrgId: opts.rootOrgId ?? '*',
@@ -430,6 +446,51 @@ export class ContentEditorService {
         mimeType: c.mimeType ? String(c.mimeType) : undefined,
       };
     });
+  }
+
+  /** Live AssessmentItem counts per skill x level, the availability the job allocates from (same channel + category filters). */
+  async searchAssessmentItemBucketCounts(
+    skills: string[],
+    channel?: string,
+    categoryField = 'skill',
+  ): Promise<Record<string, Record<'E' | 'M' | 'D', number>>> {
+    const levels = [['E', 'EASY'], ['M', 'MEDIUM'], ['D', 'DIFFICULT']] as const;
+    const pairs = skills.flatMap((skill) => levels.map(([key, qlevel]) => ({ skill, key, qlevel })));
+    // limit 1: `count` reflects the total matches regardless of limit.
+    const results = await Promise.all(pairs.map(({ skill, qlevel }) => {
+      const filters: Record<string, unknown> = { status: ['Live'], objectType: 'AssessmentItem', [categoryField]: [skill], qlevel };
+      if (channel) filters.channel = channel;
+      return this.request<{ count?: number }>('POST', this.ep.compositeSearch, { request: { filters, fields: ['identifier'], limit: 1 } });
+    }));
+    const out: Record<string, Record<'E' | 'M' | 'D', number>> = {};
+    pairs.forEach(({ skill, key }, i) => {
+      out[skill] = out[skill] ?? { E: 0, M: 0, D: 0 };
+      out[skill][key] = Number(results[i]?.count ?? 0) || 0;
+    });
+    return out;
+  }
+
+  /** Live AssessmentItems per skill, with the same filters knowlg-service uses to reject a refresh (no channel, any level). */
+  async searchSkillPoolCounts(skills: string[], categoryField = 'skill'): Promise<Record<string, number>> {
+    const results = await Promise.all(skills.map((skill) => this.request<{ count?: number }>(
+      'POST',
+      this.ep.compositeSearch,
+      { request: { filters: { status: ['Live'], objectType: 'AssessmentItem', [categoryField]: [skill] }, fields: ['identifier'], limit: 1 } },
+    )));
+    return Object.fromEntries(skills.map((skill, i) => [skill, Number(results[i]?.count ?? 0) || 0]));
+  }
+
+  /** Live system-default frameworks for the Framework picker, channel-scoped via X-Channel-Id, same as question-set editor-v2's searchFrameworks. */
+  async searchFrameworks(channel?: string): Promise<Array<{ identifier: string; name: string }>> {
+    const result = await this.request<{ Framework?: Array<Record<string, unknown>> }>(
+      'POST',
+      this.ep.compositeSearch,
+      { request: { filters: { objectType: 'Framework', status: ['Live'], systemDefault: 'Yes' } } },
+      channel ? { headers: { 'X-Channel-Id': channel } } : undefined,
+    );
+    return (result?.Framework ?? [])
+      .map((f) => ({ identifier: String(f.identifier ?? ''), name: String(f.name ?? f.identifier ?? '') }))
+      .filter((f) => f.identifier);
   }
 
   /** Creates an image Asset record then uploads the file to it (asset/v1/create → asset/v1/upload/{id}), returning the artifact URL. */

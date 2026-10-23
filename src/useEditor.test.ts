@@ -236,3 +236,317 @@ describe('useEditor — transcript generation on upload', () => {
     expect(service.createTranscript).not.toHaveBeenCalled();
   });
 });
+
+describe('Dynamic Assess content view gating', () => {
+  it('lands on the player view with no artifactUrl, unlike ordinary content (positive)', async () => {
+    const service = svc();
+    const result = await mountWithContent(service, videoContent({
+      identifier: 'do_dynamic_assess_1',
+      mimeType: 'application/vnd.ekstep.ecml-archive',
+      primaryCategory: 'Dynamic Course Assessment',
+      artifactUrl: undefined,
+    }));
+    expect(result.current.view).toBe('player');
+  });
+
+  it('ordinary content with no artifactUrl still lands on the upload view (negative)', async () => {
+    const service = svc();
+    const result = await mountWithContent(service, videoContent({ artifactUrl: undefined }));
+    expect(result.current.view).toBe('upload');
+  });
+
+  it('auto-opens the metadata drawer on load in edit mode (positive)', async () => {
+    const service = svc();
+    const result = await mountWithContent(service, videoContent({
+      identifier: 'do_dynamic_assess_2',
+      mimeType: 'application/vnd.ekstep.ecml-archive',
+      primaryCategory: 'Dynamic Course Assessment',
+      status: 'Draft',
+      artifactUrl: undefined,
+    }));
+    await waitFor(() => expect(result.current.drawer).toBe('metadata'));
+  });
+
+  it('reads the body (generated questions) for Dynamic Assess content (positive)', async () => {
+    const service = svc();
+    await mountWithContent(service, videoContent({ identifier: 'do_da_body', primaryCategory: 'Dynamic Course Assessment', artifactUrl: undefined }));
+    expect(service.readContent).toHaveBeenCalledWith('do_da_body', 'edit', { withBody: true });
+  });
+
+  it('never reads the body for ordinary content (negative)', async () => {
+    const service = svc();
+    await mountWithContent(service, videoContent({ artifactUrl: 'https://cdn/video.mp4' }));
+    for (const call of (service.readContent as ReturnType<typeof vi.fn>).mock.calls) expect(call[2]).toBeUndefined();
+  });
+
+  it('does not auto-open the metadata drawer for ordinary content (negative)', async () => {
+    const service = svc();
+    const result = await mountWithContent(service, videoContent({ artifactUrl: 'https://cdn/video.mp4' }));
+    expect(result.current.drawer).toBeNull();
+  });
+});
+
+describe('useEditor — Dynamic Assess refreshBody polling', () => {
+  const daContent = (over: Partial<ContentData> = {}): ContentData => videoContent({
+    identifier: 'do_da_1', mimeType: 'application/vnd.ekstep.ecml-archive',
+    primaryCategory: 'Dynamic Course Assessment', status: 'Draft',
+    totalQuestions: 3, lastUpdatedOn: 't0',
+    skill: ['Physics'], difficultyTarget: '{"E":1,"M":1,"D":1}', ...over,
+  } as Partial<ContentData>);
+
+  it('blocks Generate with a clear message when Skill is not saved, instead of a misleading wait (positive)', async () => {
+    const refreshContentBody = vi.fn();
+    const service = svc({ refreshContentBody });
+    const result = await mountWithContent(service, daContent({ skill: [] }));
+    await act(async () => { await result.current.refreshBody(); });
+    expect(refreshContentBody).not.toHaveBeenCalled();
+    expect(result.current.toast?.msg).toBe('Set Skill and Difficulty Target before generating questions.');
+    expect(result.current.dynamicAssessRefreshing).toBe(false);
+  });
+
+  it('blocks Generate when every difficulty count is zero (negative)', async () => {
+    const refreshContentBody = vi.fn();
+    const service = svc({ refreshContentBody });
+    const result = await mountWithContent(service, daContent({ difficultyTarget: '{"E":0,"M":0,"D":0}' }));
+    await act(async () => { await result.current.refreshBody(); });
+    expect(refreshContentBody).not.toHaveBeenCalled();
+  });
+
+  it('detects a regenerate that keeps the same count via lastUpdatedOn, without needing a publish (positive)', async () => {
+    const refreshContentBody = vi.fn().mockResolvedValue({});
+    const service = svc({ refreshContentBody });
+    const result = await mountWithContent(service, daContent());
+    vi.useFakeTimers();
+    try {
+      const readContent = service.readContent as ReturnType<typeof vi.fn>;
+      readContent
+        .mockResolvedValueOnce(daContent())                         // baseline
+        .mockResolvedValueOnce(daContent())                         // poll 1: job not done
+        .mockResolvedValue(daContent({ lastUpdatedOn: 't1' }));     // poll 2: job wrote
+
+      await act(async () => { await result.current.refreshBody(); });
+      expect(refreshContentBody).toHaveBeenCalledWith('do_da_1', 'u1'); // logged-in user as lastPublishedBy
+      expect(result.current.dynamicAssessRefreshing).toBe(true);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(result.current.dynamicAssessRefreshing).toBe(true);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(result.current.dynamicAssessRefreshing).toBe(false);
+      expect(result.current.toast?.msg).toBe('Questions generated');
+      expect(result.current.content?.pkgVersion ?? 0).toBe(0); // still an unpublished Draft
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('says generation is still in progress, not done, when nothing changes before the poll limit (negative)', async () => {
+    const service = svc({ refreshContentBody: vi.fn().mockResolvedValue({}) });
+    const result = await mountWithContent(service, daContent());
+    vi.useFakeTimers();
+    try {
+      await act(async () => { await result.current.refreshBody(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000 * 21); });
+      expect(result.current.dynamicAssessRefreshing).toBe(false);
+      expect(result.current.toast?.msg).toMatch(/haven't appeared yet/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('useEditor — Dynamic Assess refreshBody timeout', () => {
+  const daContent = (over: Partial<ContentData> = {}): ContentData => videoContent({
+    identifier: 'do_da_t', mimeType: 'application/vnd.ekstep.ecml-archive',
+    primaryCategory: 'Dynamic Course Assessment', status: 'Draft',
+    totalQuestions: 0, lastUpdatedOn: 't0',
+    skill: ['Physics'], difficultyTarget: '{"E":1,"M":1,"D":1}', ...over,
+  } as Partial<ContentData>);
+
+  it('shows what the server has after the poll limit, even when the job wrote before the baseline read (positive)', async () => {
+    const service = svc({ refreshContentBody: vi.fn().mockResolvedValue({}) });
+    const result = await mountWithContent(service, daContent());
+    vi.useFakeTimers();
+    try {
+      // The job finished before the baseline read, so no poll ever sees a change.
+      (service.readContent as ReturnType<typeof vi.fn>).mockResolvedValue(daContent({ totalQuestions: 3, lastUpdatedOn: 't1' }));
+      await act(async () => { await result.current.refreshBody(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000 * 21); });
+      expect(result.current.dynamicAssessRefreshing).toBe(false);
+      expect(result.current.content?.totalQuestions).toBe(3);
+      expect(result.current.hasGeneratedBody).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still says pending, and clears the loader, when the last read fails (negative)', async () => {
+    const service = svc({ refreshContentBody: vi.fn().mockResolvedValue({}) });
+    const result = await mountWithContent(service, daContent());
+    vi.useFakeTimers();
+    try {
+      (service.readContent as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('down'));
+      await act(async () => { await result.current.refreshBody(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000 * 21); });
+      expect(result.current.dynamicAssessRefreshing).toBe(false);
+      expect(result.current.toast?.msg).toMatch(/haven't appeared yet/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('useEditor — Save also generates when needed', () => {
+  const generatedBody = JSON.stringify({
+    theme: { stage: [{ 'org.ekstep.questionset': { config: { __cdata: JSON.stringify({ dynamic_assess: { skills: ['Physics'], target: { E: 1, M: 0, D: 0 } } }) } } }] },
+  });
+  const daContent = (over: Partial<ContentData> = {}): ContentData => videoContent({
+    identifier: 'do_da_2', mimeType: 'application/vnd.ekstep.ecml-archive', primaryCategory: 'Dynamic Course Assessment', ...over,
+  } as Partial<ContentData>);
+
+  it('generates right after the first save that has Skill and Difficulty Target (positive)', async () => {
+    const refreshContentBody = vi.fn().mockResolvedValue({});
+    const result = await mountWithContent(svc({ refreshContentBody }), daContent({ totalQuestions: 0 } as Partial<ContentData>));
+    await act(async () => { await result.current.saveMetadata({ skill: ['Physics'], difficultyTarget: '{"E":1,"M":0,"D":0}' }); });
+    await waitFor(() => expect(refreshContentBody).toHaveBeenCalledWith('do_da_2', 'u1'));
+    expect(result.current.dynamicAssessRefreshing).toBe(true);
+  });
+
+  it('regenerates when a save changes the Skill of already-generated questions (positive)', async () => {
+    const refreshContentBody = vi.fn().mockResolvedValue({});
+    const content = daContent({ totalQuestions: 3, skill: ['Physics'], difficultyTarget: '{"E":1,"M":0,"D":0}', body: generatedBody } as Partial<ContentData>);
+    const result = await mountWithContent(svc({ refreshContentBody }), content);
+    await act(async () => { await result.current.saveMetadata({ skill: ['Physics', 'Chemistry'] }); });
+    await waitFor(() => expect(refreshContentBody).toHaveBeenCalled());
+  });
+
+  it('is a plain save, with no generate call, for a spelling fix (negative)', async () => {
+    const refreshContentBody = vi.fn();
+    const content = daContent({ totalQuestions: 3, skill: ['Physics'], difficultyTarget: '{"E":1,"M":0,"D":0}', body: generatedBody } as Partial<ContentData>);
+    const result = await mountWithContent(svc({ refreshContentBody }), content);
+    await act(async () => { await result.current.saveMetadata({ name: 'Fixed typo' }); });
+    expect(refreshContentBody).not.toHaveBeenCalled();
+    expect(result.current.toast?.msg).toBe('Details saved — content updated');
+  });
+
+  it('keeps the generic toast for other content (negative)', async () => {
+    const result = await mountWithContent(svc(), videoContent());
+    await act(async () => { await result.current.saveMetadata({ name: 'Renamed' }); });
+    expect(result.current.toast?.msg).toBe('Details saved — content updated');
+  });
+});
+
+describe('useEditor — Dynamic Assess settings changed after generation', () => {
+  const generatedBody = JSON.stringify({
+    theme: { stage: [{ 'org.ekstep.questionset': { config: { __cdata: JSON.stringify({ dynamic_assess: { skills: ['Physics'], target: { E: 3, M: 3, D: 3 } } }) } } }] },
+  });
+  const daContent = (over: Partial<ContentData> = {}): ContentData => videoContent({
+    identifier: 'do_da_s', mimeType: 'application/vnd.ekstep.ecml-archive',
+    primaryCategory: 'Dynamic Course Assessment', status: 'Draft', totalQuestions: 9,
+    skill: ['Physics'], difficultyTarget: '{"E":3,"M":3,"D":3}', body: generatedBody, ...over,
+  } as Partial<ContentData>);
+
+  it('blocks Send for Review when the target was changed without regenerating (positive)', async () => {
+    const service = svc();
+    const result = await mountWithContent(service, daContent({ difficultyTarget: '{"E":3,"M":2,"D":3}' } as Partial<ContentData>));
+    expect(result.current.dynamicAssessStale).toBe(true);
+    await act(async () => { await result.current.sendForReview(); });
+    expect(service.sendForReview).not.toHaveBeenCalled();
+    expect(result.current.toast?.msg).toMatch(/changed since the questions were generated/);
+  });
+
+  it('saves but does not submit when the review drawer itself changes the skill (positive)', async () => {
+    const service = svc();
+    const result = await mountWithContent(service, daContent());
+    expect(result.current.dynamicAssessStale).toBe(false);
+    await act(async () => { await result.current.saveMetadataAndSubmit({ skill: ['Chemistry'] }); });
+    expect(service.updateContent).toHaveBeenCalled();
+    expect(service.sendForReview).not.toHaveBeenCalled();
+    expect(result.current.dynamicAssessStale).toBe(true);
+  });
+
+  it('blocks Publish for a reviewer when settings do not match the questions (positive)', async () => {
+    const publishContent = vi.fn().mockResolvedValue({});
+    const service = svc({ publishContent });
+    const result = await mountWithContent(service, daContent({ skill: ['Chemistry'] }));
+    await act(async () => { await result.current.publish(); });
+    expect(publishContent).not.toHaveBeenCalled();
+    expect(result.current.toast?.msg).toMatch(/Request changes/);
+  });
+
+  it('submits normally when the settings still match the generated questions (negative)', async () => {
+    const service = svc();
+    const result = await mountWithContent(service, daContent());
+    await act(async () => { await result.current.sendForReview(); });
+    expect(service.sendForReview).toHaveBeenCalledWith('do_da_s');
+  });
+
+  it('never flags ordinary content, whatever its fields say (negative)', async () => {
+    const service = svc();
+    const result = await mountWithContent(service, daContent({ primaryCategory: 'Learning Resource', difficultyTarget: '{"E":1}' } as Partial<ContentData>));
+    expect(result.current.dynamicAssessStale).toBe(false);
+    await act(async () => { await result.current.sendForReview(); });
+    expect(service.sendForReview).toHaveBeenCalled();
+  });
+});
+
+describe('useEditor — Dynamic Assess Generate edge cases', () => {
+  const daContent = (over: Partial<ContentData> = {}): ContentData => videoContent({
+    identifier: 'do_da_g', mimeType: 'application/vnd.ekstep.ecml-archive',
+    primaryCategory: 'Dynamic Course Assessment', status: 'Live',
+    totalQuestions: 6, lastUpdatedOn: 't0',
+    skill: ['Physics'], difficultyTarget: '{"E":2,"M":2,"D":2}', ...over,
+  } as Partial<ContentData>);
+
+  it('ignores the edit-copy write the API makes for Live content and waits for the job (positive)', async () => {
+    const service = svc({ refreshContentBody: vi.fn().mockResolvedValue({}) });
+    const result = await mountWithContent(service, daContent());
+    vi.useFakeTimers();
+    try {
+      (service.readContent as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(daContent({ lastUpdatedOn: 't-img' }))      // baseline, after the API created the .img copy
+        .mockResolvedValueOnce(daContent({ lastUpdatedOn: 't-img' }))      // poll 1: job not done
+        .mockResolvedValue(daContent({ lastUpdatedOn: 't-job' }));         // poll 2: job wrote
+      await act(async () => { await result.current.refreshBody(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(result.current.dynamicAssessRefreshing).toBe(true);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(result.current.dynamicAssessRefreshing).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops polling when the editor unmounts mid-generation (negative)', async () => {
+    const service = svc({ refreshContentBody: vi.fn().mockResolvedValue({}) });
+    (service.readContent as ReturnType<typeof vi.fn>).mockResolvedValue(daContent());
+    const { result, unmount } = renderHook(() => useEditor({ context: mockContext, contentId: 'do_da_g', service }));
+    await waitFor(() => expect(result.current.content?.identifier).toBe('do_da_g'));
+    vi.useFakeTimers();
+    try {
+      await act(async () => { await result.current.refreshBody(); });
+      unmount();
+      const callsAtUnmount = (service.readContent as ReturnType<typeof vi.fn>).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(3000 * 5);
+      expect((service.readContent as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAtUnmount);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refuses Send for Review before any questions are generated, whatever the caller (positive)', async () => {
+    const service = svc();
+    const result = await mountWithContent(service, daContent({ status: 'Draft', totalQuestions: 0 }));
+    await act(async () => { await result.current.sendForReview(); });
+    expect(service.sendForReview).not.toHaveBeenCalled();
+    expect(result.current.toast?.msg).toBe('Generate questions before sending for review');
+  });
+
+  it('translates the knowlg-service per-skill rejection instead of showing its English text (positive)', async () => {
+    const rejection = Object.assign(new Error('Fewer than 6 Live questions found for skill(s): Azure'), { code: 'ERR_SKILL_INSUFFICIENT_POOL' });
+    const service = svc({ refreshContentBody: vi.fn().mockRejectedValue(rejection) });
+    const result = await mountWithContent(service, daContent({ status: 'Draft' }));
+    await act(async () => { await result.current.refreshBody(); });
+    expect(result.current.toast?.msg).toBe('Each skill needs at least 6 Live questions. Too few for: Azure');
+    expect(result.current.dynamicAssessRefreshing).toBe(false);
+  });
+});

@@ -1,22 +1,75 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import Drawer from './Drawer';
 import type { EditorController } from '../useEditor';
 import type { FormField, FrameworkCategory } from '../types';
-import { t } from '../i18n/i18n';
-import { cascadedOptions } from '../taxonomy';
+import { t, tf } from '../i18n/i18n';
+import { cascadedOptions, deepestCategoryCode } from '../taxonomy';
 import { PencilIcon, ChevronDown, ImageIcon, CheckIcon } from '../icons';
+import { type DifficultyTarget, toDifficultyTarget, serializeDifficultyTarget } from '../difficultyTarget';
+import { needsGeneration } from '../dynamicAssessDraw';
+import { planPool } from '../poolPlan';
+import { DYNAMIC_ASSESS_MIN_CRITERIA, DYNAMIC_ASSESS_POOL_MULTIPLIER } from '../constants';
 
 /**
  * Multi-value field? Driven by the form definition, not a hardcoded list — a field
  * is an array if the form marks it multiselect (or dataType 'list'), so any custom
  * taxonomy category the framework returns is handled dynamically.
  */
-function isMultiField(f: FormField): boolean {
+function isMultiField(f: FormField, dynamicAssess = false): boolean {
+  if (dynamicAssess && isSkillField(f)) return true;
   const it = (f.inputType ?? '').toLowerCase();
   if (it.includes('multi')) return true;
   const dt = (f.dataType ?? '').toLowerCase();
   return dt === 'list';
 }
+
+/** difficultyTarget is matched by code: the form definition has no inputType for three named number fields. */
+function isDifficultyTargetField(f: FormField): boolean {
+  return f.code?.toLowerCase() === 'difficultytarget';
+}
+
+/** Dynamic Assess skill is always a list bound to the framework's deepest category, matching question-set editor-v2's isSkillField. */
+function isSkillField(f: FormField): boolean {
+  return f.code?.toLowerCase() === 'skill';
+}
+
+
+const DifficultyTargetInput: React.FC<{
+  lang: string; label: string; required?: boolean; disabled?: boolean;
+  value: DifficultyTarget; onChange: (v: DifficultyTarget) => void;
+}> = ({ lang, label, required, disabled, value, onChange }) => {
+  const rows: Array<{ key: keyof DifficultyTarget; text: string }> = [
+    { key: 'E', text: t(lang, 'DIFFICULTY_EASY') },
+    { key: 'M', text: t(lang, 'DIFFICULTY_MEDIUM') },
+    { key: 'D', text: t(lang, 'DIFFICULTY_DIFFICULT') },
+  ];
+  const labelId = useId();
+  return (
+    <div className="ce-field-full" role="group" aria-labelledby={labelId}>
+      <label id={labelId} className="ce-label-sm">{label}{required && <span className="ce-required-star">*</span>}</label>
+      <div style={{ display: 'flex', gap: 12 }}>
+        {rows.map(({ key, text }) => (
+          <div key={key} style={{ flex: 1 }}>
+            <span className="ce-label-sm" style={{ fontWeight: 400 }} aria-hidden="true">{text}</span>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              className="ce-input ce-input-sm"
+              aria-label={text}
+              value={value[key] ?? 0}
+              disabled={disabled}
+              onChange={(e) => {
+                const n = e.target.value === '' ? 0 : Math.max(0, Math.floor(Number(e.target.value)) || 0);
+                onChange({ ...value, [key]: n });
+              }}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
 
 /** Fallback field set when form/read returns nothing (keeps the drawer usable). */
 const FALLBACK_FIELDS: FormField[] = [
@@ -110,6 +163,8 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
   const [values, setValues] = useState<Record<string, string>>({});
   /* Multi-value taxonomy fields (medium, gradeLevel, subject) — real arrays. */
   const [multiVals, setMultiVals] = useState<Record<string, string[]>>({});
+  /* Dynamic Assess difficultyTarget fields — object-shaped {E,M,D}, keyed by code. */
+  const [diffTargets, setDiffTargets] = useState<Record<string, DifficultyTarget>>({});
   const [appIcon, setAppIcon] = useState<string | undefined>();
   const [categories, setCategories] = useState<FrameworkCategory[]>([]);
   const [formFields, setFormFields] = useState<FormField[]>([]);
@@ -117,14 +172,32 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
   const loadedFormKey = useRef<string | null>(null);
   /** Content id already seeded this open-session — prevents an async form load re-seeding over edits. */
   const seededRef = useRef<string | null>(null);
+  /** Separate seed guard for difficultyTarget: it only appears once the async form loads, after seededRef has already fired. */
+  const diffSeededRef = useRef<string | null>(null);
+  /* Dynamic Assess: author-chosen framework; skill options come from its deepest category. */
+  const [selectedFw, setSelectedFw] = useState('');
+  // True while the pool searches run before a generating save, so a second click can't save twice.
+  const [checking, setChecking] = useState(false);
+  const [fwOptions, setFwOptions] = useState<Array<{ identifier: string; name: string }>>([]);
+  const contentChannel = (content as Record<string, unknown> | null)?.channel as string | undefined;
+
+  useEffect(() => {
+    if (open) setSelectedFw(String(content?.framework || framework || ''));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, content?.identifier]);
+
+  useEffect(() => {
+    if (!open || !ed.isDynamicAssess) return;
+    service.searchFrameworks(contentChannel ?? ed.context.channel).then(setFwOptions).catch(() => setFwOptions([]));
+  }, [open, ed.isDynamicAssess, service, contentChannel, ed.context.channel]);
 
   /* Framework categories for taxonomy cascade. */
   useEffect(() => {
-    const fw = content?.framework || framework;
+    const fw = selectedFw || content?.framework || framework;
     if (!open || !fw || loadedFw.current === fw) return;
     loadedFw.current = fw;
     service.readFramework(fw).then(setCategories).catch(() => setCategories([]));
-  }, [open, content, framework, service]);
+  }, [open, content, framework, service, selectedFw]);
 
   /* Form/read field definitions — save form for Edit Details, review form for
    * Submit-for-review. Keyed on subtype+action so switching mode refetches even
@@ -157,6 +230,7 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
     () => [...categories].sort((a, b) => (a.index ?? 0) - (b.index ?? 0)).map((c) => c.code),
     [categories],
   );
+  const skillCategoryCode = useMemo(() => deepestCategoryCode(categories), [categories]);
 
   const setVal = (code: string, v: string) => setValues((s) => ({ ...s, [code]: v }));
   const setMulti = (code: string, v: string[]) => setMultiVals((s) => ({ ...s, [code]: v }));
@@ -177,8 +251,9 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
     for (const f of fields) {
       if (f.code === 'name' || f.code === 'description') continue;
       if (f.code === 'appicon' || f.code === 'appIcon') continue;
+      if (isDifficultyTargetField(f)) continue; // seeded separately below — see diffSeededRef
       const cv = (content as Record<string, unknown>)[f.code];
-      if (isMultiField(f)) {
+      if (isMultiField(f, ed.isDynamicAssess)) {
         multi[f.code] = Array.isArray(cv) ? cv.map(String) : cv != null && cv !== '' ? [String(cv)] : [];
       } else {
         vals[f.code] = cv != null ? String(cv) : '';
@@ -187,6 +262,27 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
     setValues(vals);
     setMultiVals(multi);
     setAppIcon(content.appIcon);
+  }, [open, content, fields]);
+
+  /* Seeds difficultyTarget and skill once they appear (form-only fields, absent from FALLBACK_FIELDS); safe since neither is rendered before then. */
+  useEffect(() => {
+    if (!open) { diffSeededRef.current = null; return; }
+    if (!content) return;
+    const dtFields = fields.filter(isDifficultyTargetField);
+    if (dtFields.length === 0) return;
+    if (diffSeededRef.current === content.identifier) return;
+    diffSeededRef.current = content.identifier;
+    const diff: Record<string, DifficultyTarget> = {};
+    for (const f of dtFields) {
+      diff[f.code] = toDifficultyTarget((content as Record<string, unknown>)[f.code]);
+    }
+    setDiffTargets((s) => ({ ...s, ...diff }));
+    const skill: Record<string, string[]> = {};
+    for (const f of ed.isDynamicAssess ? fields.filter(isSkillField) : []) {
+      const cv = (content as Record<string, unknown>)[f.code];
+      skill[f.code] = Array.isArray(cv) ? cv.map(String) : cv != null && cv !== '' ? [String(cv)] : [];
+    }
+    setMultiVals((s) => ({ ...s, ...skill }));
   }, [open, content, fields]);
 
   const appIconField = fields.find((f) => f.code === 'appicon' || f.code === 'appIcon');
@@ -211,6 +307,16 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
     }
   };
 
+  /** A new framework means different category terms, so clear skill and every category value picked under the old one. */
+  const onFrameworkChange = (fw: string) => {
+    const codes = [...categories.map((c) => c.code), 'skill'];
+    setSelectedFw(fw);
+    setCategories([]);
+    loadedFw.current = null; // otherwise re-picking the original framework (or the placeholder) never reloads its categories
+    setMultiVals((s) => ({ ...s, ...Object.fromEntries(codes.map((c) => [c, []])) }));
+    setValues((s) => ({ ...s, ...Object.fromEntries(codes.filter((c) => c in s).map((c) => [c, ''])) }));
+  };
+
   /** Labels of required, editable, visible fields left empty (any inputType). */
   const missingRequired = (): string[] => {
     const miss: string[] = [];
@@ -219,14 +325,90 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
       const code = f.code;
       let empty: boolean;
       if (code === 'appicon' || code === 'appIcon') empty = !appIcon;
-      else if (isMultiField(f)) empty = (multiVals[code] ?? []).length === 0;
+      else if (isDifficultyTargetField(f)) {
+        const dt = diffTargets[code] ?? {};
+        empty = (dt.E ?? 0) + (dt.M ?? 0) + (dt.D ?? 0) <= 0;
+      }
+      else if (isMultiField(f, ed.isDynamicAssess)) empty = (multiVals[code] ?? []).length === 0;
       else empty = !((values[code] ?? '').trim());
       if (empty) miss.push(f.label ?? f.name ?? code);
     }
     return miss;
   };
 
-  const onSave = () => {
+  /** The fields this save would write; the Save label and onSave both read it, so they never disagree. */
+  const buildOut = (): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    for (const f of fields) {
+      if (f.editable === false) continue;
+      const code = f.code === 'appIcon' ? 'appIcon' : f.code;
+      if (code === 'appicon' || code === 'appIcon') continue; // handled below
+      if (isDifficultyTargetField(f)) {
+        out[f.code] = serializeDifficultyTarget(diffTargets[f.code] ?? { E: 0, M: 0, D: 0 });
+        continue;
+      }
+      if (isMultiField(f, ed.isDynamicAssess)) {
+        const arr = multiVals[f.code] ?? [];
+        out[f.code] = arr.length ? arr : undefined;
+        continue;
+      }
+      const raw = values[f.code];
+      if (raw == null) continue;
+      out[f.code] = raw || undefined;
+    }
+    if (appIcon) out.appIcon = appIcon;
+    if (ed.isDynamicAssess && selectedFw) out.framework = selectedFw;
+    out.name = (values.name ?? '').trim();
+    return out;
+  };
+
+  /** Blocks the save unless the job could generate these settings (its own allocation rules) and knowlg-service would accept every skill; returns true to proceed. */
+  const checkPoolSufficiency = async (candidate: Record<string, unknown>): Promise<boolean> => {
+    const target = toDifficultyTarget(candidate.difficultyTarget);
+    const skillValues = Array.isArray(candidate.skill) ? candidate.skill.map(String) : [];
+    const m = DYNAMIC_ASSESS_POOL_MULTIPLIER;
+    let buckets: Record<string, Record<'E' | 'M' | 'D', number>>;
+    let skillCounts: Record<string, number>;
+    try {
+      const channel = (content as Record<string, unknown> | null)?.channel as string | undefined;
+      [buckets, skillCounts] = await Promise.all([
+        service.searchAssessmentItemBucketCounts(skillValues, channel ?? ed.context.channel, skillCategoryCode ?? 'skill'),
+        service.searchSkillPoolCounts(skillValues, skillCategoryCode ?? 'skill'),
+      ]);
+    } catch {
+      showToast(t(lang, 'ERROR_POOL_CHECK_FAILED'), 'error');
+      return false;
+    }
+    const plan = planPool(skillValues, target, (s, l) => buckets[s]?.[l] ?? 0, DYNAMIC_ASSESS_MIN_CRITERIA, m);
+    if (plan.infeasible) {
+      showToast(tf(lang, 'ERROR_TOO_MANY_SKILLS', { count: skillValues.length, needed: skillValues.length * DYNAMIC_ASSESS_MIN_CRITERIA, min: DYNAMIC_ASSESS_MIN_CRITERIA }), 'error');
+      return false;
+    }
+    if (plan.uncovered.length) {
+      const levelKey = { E: 'DIFFICULTY_EASY', M: 'DIFFICULTY_MEDIUM', D: 'DIFFICULTY_DIFFICULT' } as const;
+      const lines = plan.uncovered.map(({ level, covered, target: requested }) =>
+        tf(lang, 'ERROR_POOL_SHORTFALL', { level: t(lang, levelKey[level]), requested, needed: requested * m, available: covered * m }));
+      showToast(`${t(lang, 'ERROR_POOL_INSUFFICIENT')}: ${lines.join('; ')}`, 'error');
+      return false;
+    }
+    // A skill that can't get its own minimum would be left out of the pool, and the settings would then never match the questions.
+    if (plan.shortSkills.length) {
+      showToast(tf(lang, 'ERROR_SKILL_LEVELS_SHORT', { skills: plan.shortSkills.join(', ') }), 'error');
+      return false;
+    }
+    // Same per-skill floor knowlg-service enforces at Generate, so it fails here, translated, instead of after a successful save.
+    const perSkill = DYNAMIC_ASSESS_MIN_CRITERIA * m;
+    const shortSkills = skillValues.filter((s) => (skillCounts[s] ?? 0) < perSkill);
+    if (shortSkills.length) {
+      showToast(tf(lang, 'ERROR_SKILL_POOL_TOO_SMALL', { needed: perSkill, skills: shortSkills.join(', ') }), 'error');
+      return false;
+    }
+    return true;
+  };
+
+  const onSave = async () => {
+    if (checking || busy) return; // a second click during the pool searches would save and generate twice
+    if (ed.dynamicAssessRefreshing) return; // a save now would skip generating, since only one generation runs at a time
     const nameField = fields.find((f) => f.code === 'name');
     if (nameField?.required !== false && !(values.name ?? '').trim()) {
       showToast(t(lang, 'ERROR_TITLE_REQUIRED'), 'error');
@@ -237,22 +419,22 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
       const miss = missingRequired();
       if (miss.length) { setReviewErrors(miss); return; }
     }
-    const out: Record<string, unknown> = {};
-    for (const f of fields) {
-      if (f.editable === false) continue;
-      const code = f.code === 'appIcon' ? 'appIcon' : f.code;
-      if (code === 'appicon' || code === 'appIcon') continue; // handled below
-      if (isMultiField(f)) {
-        const arr = multiVals[f.code] ?? [];
-        out[f.code] = arr.length ? arr : undefined;
-        continue;
-      }
-      const raw = values[f.code];
-      if (raw == null) continue;
-      out[f.code] = raw || undefined;
+    const out = buildOut();
+    const generates = needsGeneration({ ...(content ?? {}), ...out });
+    // Submitting can't also generate, so changed settings must be saved (and generated) first.
+    if (reviewSubmitMode && generates) {
+      showToast(t(lang, 'ERROR_DYNAMIC_ASSESS_SUBMIT_STALE'), 'error');
+      return;
     }
-    if (appIcon) out.appIcon = appIcon;
-    out.name = (values.name ?? '').trim();
+    if (generates) {
+      setChecking(true);
+      try {
+        // The pool is only checked when this save will generate, so other edits cost no extra searches.
+        if (!(await checkPoolSufficiency({ ...(content ?? {}), ...out }))) return;
+      } finally {
+        setChecking(false);
+      }
+    }
     setReviewErrors([]);
     if (reviewSubmitMode) saveMetadataAndSubmit(out);
     else saveMetadata(out);
@@ -270,10 +452,62 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
 
     if (code === 'appicon' || code === 'appIcon') return null; // rendered in the top block
 
+    if (isDifficultyTargetField(f)) {
+      return (
+        <DifficultyTargetInput
+          key={code}
+          lang={lang}
+          label={label}
+          required={required}
+          disabled={disabled}
+          value={diffTargets[code] ?? { E: 0, M: 0, D: 0 }}
+          onChange={(v) => setDiffTargets((s) => ({ ...s, [code]: v }))}
+        />
+      );
+    }
+
+    if (ed.isDynamicAssess && isSkillField(f)) {
+      // Current framework stays selectable even if it isn't in the system-default search results.
+      const fwList = selectedFw && !fwOptions.some((o) => o.identifier === selectedFw)
+        ? [{ identifier: selectedFw, name: selectedFw }, ...fwOptions]
+        : fwOptions;
+      return (
+        <React.Fragment key={code}>
+          {ed.isDynamicAssess && (
+            <div className="ce-field-full">
+              <label className="ce-label-sm" htmlFor="ce-framework-picker">{t(lang, 'DYNAMIC_ASSESS_FRAMEWORK')}</label>
+              <div className="ce-select-wrap" style={{ maxWidth: 'none' }}>
+                <select
+                  id="ce-framework-picker"
+                  className="ce-select ce-select-sm"
+                  value={selectedFw}
+                  disabled={disabled}
+                  onChange={(e) => onFrameworkChange(e.target.value)}
+                >
+                  <option value="">{t(lang, 'DYNAMIC_ASSESS_SELECT_FRAMEWORK')}</option>
+                  {fwList.map((o) => <option key={o.identifier} value={o.identifier}>{o.name}</option>)}
+                </select>
+                <span className="ce-select-chevron"><ChevronDown size={12} /></span>
+              </div>
+            </div>
+          )}
+          <MultiSelect
+            label={label}
+            placeholder={skillCategoryCode ? (placeholder || `Select ${label}`) : t(lang, 'DYNAMIC_ASSESS_SELECT_FRAMEWORK_FIRST')}
+            required={required}
+            disabled={disabled || !skillCategoryCode}
+            values={multiVals[code] ?? []}
+            options={skillCategoryCode ? cascadedOptions(categories, skillCategoryCode, selectedTaxo) : []}
+            onChange={(vals) => setMulti(code, vals)}
+          />
+        </React.Fragment>
+      );
+    }
+
     if (taxoCodes.has(code)) {
       const options = cascadedOptions(categories, code, selectedTaxo);
       // Multi vs single is decided by the form definition, not the field name.
-      if (isMultiField(f)) {
+      if (isMultiField(f, ed.isDynamicAssess)) {
         return (
           <MultiSelect
             key={code}
@@ -337,9 +571,13 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
     );
   };
 
-  const taxoFields = fields.filter((f) => taxoCodes.has(f.code));
+  // Live label: tells the author when Save will also generate questions.
+  const saveGenerates = ed.isDynamicAssess && open && needsGeneration({ ...(content ?? {}), ...buildOut() });
+
+  // Skill always renders with the other fields (under its framework picker), even when a framework names a category 'skill'.
+  const taxoFields = fields.filter((f) => taxoCodes.has(f.code) && !(ed.isDynamicAssess && isSkillField(f)));
   const nonTaxoFields = fields.filter(
-    (f) => !taxoCodes.has(f.code) && f.code !== 'appicon' && f.code !== 'appIcon',
+    (f) => (!taxoCodes.has(f.code) || (ed.isDynamicAssess && isSkillField(f))) && f.code !== 'appicon' && f.code !== 'appIcon',
   );
 
   return (
@@ -354,10 +592,10 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
           <button type="button" className="ce-btn ce-btn--ghost" onClick={onClose}>
             {t(lang, 'CANCEL')}
           </button>
-          <button type="button" className="ce-btn ce-btn--primary" onClick={onSave} disabled={busy}>
-            {saving
+          <button type="button" className="ce-btn ce-btn--primary" onClick={() => void onSave()} disabled={busy || checking || ed.dynamicAssessRefreshing}>
+            {saving || checking
               ? <><span className="ce-spinner ce-spinner--xs" /> {t(lang, 'SAVING')}</>
-              : <><CheckIcon size={13} /> {reviewSubmitMode ? t(lang, 'SAVE_AND_SUBMIT') : t(lang, 'SAVE_CHANGES')}</>}
+              : <><CheckIcon size={13} /> {reviewSubmitMode ? t(lang, 'SAVE_AND_SUBMIT') : t(lang, saveGenerates ? 'SAVE_AND_GENERATE' : 'SAVE_CHANGES')}</>}
           </button>
         </>
       }

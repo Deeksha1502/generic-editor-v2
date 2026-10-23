@@ -6,6 +6,12 @@ export interface TermOption {
   name: string;
 }
 
+/** Highest-index category code, same as the knowlg-publish job's resolveCategoryCode; undefined until categories load. */
+export function deepestCategoryCode(categories: FrameworkCategory[]): string | undefined {
+  if (!categories.length) return undefined;
+  return categories.reduce((a, b) => ((b.index ?? 0) > (a.index ?? 0) ? b : a)).code;
+}
+
 /** All option names for a category. */
 export function categoryTerms(categories: FrameworkCategory[], code: string): TermOption[] {
   const cat = categories.find((c) => c.code === code);
