@@ -270,7 +270,8 @@ describe('Dynamic Assess content view gating', () => {
   it('reads the body (generated questions) for Dynamic Assess content (positive)', async () => {
     const service = svc();
     await mountWithContent(service, videoContent({ identifier: 'do_da_body', primaryCategory: 'Dynamic Course Assessment', artifactUrl: undefined }));
-    expect(service.readContent).toHaveBeenCalledWith('do_da_body', 'edit', { withBody: true });
+    // No framework, so the skill field falls back to "skill" like the backend.
+    expect(service.readContent).toHaveBeenCalledWith('do_da_body', 'edit', { withBody: true, extraFields: ['skill'] });
   });
 
   it('never reads the body for ordinary content (negative)', async () => {
@@ -406,7 +407,7 @@ describe('useEditor — Save also generates when needed', () => {
   it('generates right after the first save that has Skill and Difficulty Target (positive)', async () => {
     const refreshContentBody = vi.fn().mockResolvedValue({});
     const result = await mountWithContent(svc({ refreshContentBody }), daContent({ totalQuestions: 0 } as Partial<ContentData>));
-    await act(async () => { await result.current.saveMetadata({ skill: ['Physics'], difficultyTarget: '{"E":1,"M":0,"D":0}' }); });
+    await act(async () => { await result.current.saveMetadata({ skill: ['Physics'], difficultyTarget: '{"E":1,"M":0,"D":0}' }, { skillField: 'skill' }); });
     await waitFor(() => expect(refreshContentBody).toHaveBeenCalledWith('do_da_2', 'u1'));
     expect(result.current.dynamicAssessRefreshing).toBe(true);
   });
@@ -415,7 +416,7 @@ describe('useEditor — Save also generates when needed', () => {
     const refreshContentBody = vi.fn().mockResolvedValue({});
     const content = daContent({ totalQuestions: 3, skill: ['Physics'], difficultyTarget: '{"E":1,"M":0,"D":0}', body: generatedBody } as Partial<ContentData>);
     const result = await mountWithContent(svc({ refreshContentBody }), content);
-    await act(async () => { await result.current.saveMetadata({ skill: ['Physics', 'Chemistry'] }); });
+    await act(async () => { await result.current.saveMetadata({ skill: ['Physics', 'Chemistry'] }, { skillField: 'skill' }); });
     await waitFor(() => expect(refreshContentBody).toHaveBeenCalled());
   });
 
@@ -458,7 +459,7 @@ describe('useEditor — Dynamic Assess settings changed after generation', () =>
     const service = svc();
     const result = await mountWithContent(service, daContent());
     expect(result.current.dynamicAssessStale).toBe(false);
-    await act(async () => { await result.current.saveMetadataAndSubmit({ skill: ['Chemistry'] }); });
+    await act(async () => { await result.current.saveMetadataAndSubmit({ skill: ['Chemistry'] }, { skillField: 'skill' }); });
     expect(service.updateContent).toHaveBeenCalled();
     expect(service.sendForReview).not.toHaveBeenCalled();
     expect(result.current.dynamicAssessStale).toBe(true);
@@ -548,5 +549,37 @@ describe('useEditor — Dynamic Assess Generate edge cases', () => {
     await act(async () => { await result.current.refreshBody(); });
     expect(result.current.toast?.msg).toBe('Each skill needs at least 6 Live questions. Too few for: Azure');
     expect(result.current.dynamicAssessRefreshing).toBe(false);
+  });
+});
+
+describe('useEditor — Dynamic Assess skills live in the framework\'s deepest category', () => {
+  const bmgs = [{ code: 'board', name: 'Board', index: 1, terms: [] }, { code: 'topic', name: 'Topic', index: 2, terms: [] }];
+  const daContent = (over: Partial<ContentData> = {}): ContentData => videoContent({
+    identifier: 'do_da_topic', mimeType: 'application/vnd.ekstep.ecml-archive', primaryCategory: 'Dynamic Course Assessment',
+    status: 'Draft', framework: 'BMGS', difficultyTarget: '{"E":1,"M":0,"D":0}', ...over,
+  } as Partial<ContentData>);
+
+  it('reads the selection from the deepest category field, not a field named skill (positive)', async () => {
+    const service = svc({ readFramework: vi.fn().mockResolvedValue(bmgs) });
+    const result = await mountWithContent(service, daContent({ topic: ['Algebra'], skill: ['Stray'] } as Partial<ContentData>));
+    expect(service.readContent).toHaveBeenCalledWith('do_da_topic', 'edit', { withBody: true, extraFields: ['topic'] });
+    await waitFor(() => expect(result.current.content?.dynamicSkills).toEqual(['Algebra']));
+  });
+
+  it('generates after a save that writes the deepest category, and keeps that field in polled reads (positive)', async () => {
+    const refreshContentBody = vi.fn().mockResolvedValue({});
+    const service = svc({ readFramework: vi.fn().mockResolvedValue(bmgs), refreshContentBody });
+    const result = await mountWithContent(service, daContent());
+    await act(async () => { await result.current.saveMetadata({ topic: ['Algebra'] }, { skillField: 'topic' }); });
+    await waitFor(() => expect(refreshContentBody).toHaveBeenCalledWith('do_da_topic', 'u1'));
+    expect(result.current.content?.dynamicSkills).toEqual(['Algebra']);
+  });
+
+  it('never resolves a framework or reads extra fields for ordinary content (negative)', async () => {
+    const readFramework = vi.fn().mockResolvedValue(bmgs);
+    const service = svc({ readFramework });
+    await mountWithContent(service, videoContent({ artifactUrl: 'https://cdn/video.mp4', framework: 'BMGS' } as Partial<ContentData>));
+    expect(readFramework).not.toHaveBeenCalled();
+    for (const call of (service.readContent as ReturnType<typeof vi.fn>).mock.calls) expect(call[2]).toBeUndefined();
   });
 });

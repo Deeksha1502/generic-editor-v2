@@ -82,8 +82,9 @@ export interface ContentData {
   pkgVersion?: number;
   rejectReasons?: string[];
   rejectComment?: string;
-  /** Dynamic Assess custom fields (Dynamic Course Assessment category only). */
-  skill?: string[];
+  /** Dynamic Assess only, in memory: the selected skills, read from the framework's deepest category field (e.g. "topic"); never sent back as-is. */
+  dynamicSkills?: string[];
+  /** Dynamic Assess custom field (Dynamic Course Assessment category only). */
   difficultyTarget?: { E?: number; M?: number; D?: number };
   /** Any extra fields returned by content read. */
   [key: string]: unknown;

@@ -71,10 +71,16 @@ function parseTarget(raw: unknown): AnyRecord {
   return value && typeof value === 'object' ? (value as AnyRecord) : {};
 }
 
+/** The selected skills: the terms in the framework's deepest category field (`skillField`, e.g. "topic"), the same field the backend reads them from. */
+export function selectedSkills(c: Record<string, unknown>, skillField: string): string[] {
+  const v = c[skillField];
+  return [...new Set((Array.isArray(v) ? v : v ? [v] : []).map(String).filter(Boolean))];
+}
+
 /** Save must also generate when Skill + Difficulty Target are usable and there are no questions yet or they were built for other settings; any other save is a plain save. */
-export function needsGeneration(c: { primaryCategory?: string; skill?: unknown; difficultyTarget?: unknown; totalQuestions?: unknown; body?: unknown } | null): boolean {
+export function needsGeneration(c: { primaryCategory?: string; dynamicSkills?: unknown; difficultyTarget?: unknown; totalQuestions?: unknown; body?: unknown } | null): boolean {
   if (c?.primaryCategory !== 'Dynamic Course Assessment') return false;
-  const skills = Array.isArray(c.skill) ? c.skill.map(String) : [];
+  const skills = Array.isArray(c.dynamicSkills) ? c.dynamicSkills.map(String) : [];
   const target = parseTarget(c.difficultyTarget);
   const savedTarget = { E: Number(target.E) || 0, M: Number(target.M) || 0, D: Number(target.D) || 0 };
   if (!skills.length || savedTarget.E + savedTarget.M + savedTarget.D <= 0) return false;

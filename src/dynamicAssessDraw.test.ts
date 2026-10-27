@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ecmlBodyForUser, pickForLearner, isGenerationStale } from './dynamicAssessDraw';
+import { ecmlBodyForUser, pickForLearner, isGenerationStale, needsGeneration, selectedSkills } from './dynamicAssessDraw';
 
 const levels: Record<string, string> = { a1: 'EASY', a2: 'EASY', a3: 'EASY', b1: 'MEDIUM', b2: 'MEDIUM', b3: 'MEDIUM' };
 const body = (dynamic: boolean) => ({
@@ -84,5 +84,23 @@ describe('ecmlBodyForUser — fail closed and parity', () => {
 
   it('matches the golden vector shared with the portal and the QuestionSet editor', () => {
     expect(pickForLearner(['q1', 'q2', 'q3', 'q4', 'q5', 'q6'], 2, 'user-1:do_123:EASY')).toEqual(['q6', 'q3']);
+  });
+});
+
+describe('selectedSkills and needsGeneration (the selection lives in the framework\'s deepest category field)', () => {
+  it('reads the selection from the named field, deduped (positive)', () => {
+    expect(selectedSkills({ topic: ['Algebra', 'Algebra', 'Geometry'], skill: ['Ignored'] }, 'topic')).toEqual(['Algebra', 'Geometry']);
+    expect(selectedSkills({ topic: 'Algebra' }, 'topic')).toEqual(['Algebra']);
+  });
+
+  it('is empty when that field is missing (negative)', () => {
+    expect(selectedSkills({ skill: ['Physics'] }, 'topic')).toEqual([]);
+  });
+
+  it('generates from the in-memory selection, never from a field named skill (positive/negative)', () => {
+    const base = { primaryCategory: 'Dynamic Course Assessment', difficultyTarget: '{"E":1,"M":0,"D":0}', totalQuestions: 0 };
+    expect(needsGeneration({ ...base, dynamicSkills: ['Algebra'] })).toBe(true);
+    expect(needsGeneration({ ...base, skill: ['Algebra'] } as never)).toBe(false);
+    expect(needsGeneration({ ...base, primaryCategory: 'Learning Resource', dynamicSkills: ['Algebra'] })).toBe(false);
   });
 });

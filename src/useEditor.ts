@@ -6,7 +6,8 @@ import type {
 } from './types';
 import { ContentEditorService } from './services/ContentEditorService';
 import { difficultyTargetTotal, toDifficultyTarget } from './difficultyTarget';
-import { isGenerationStale, needsGeneration } from './dynamicAssessDraw';
+import { isGenerationStale, needsGeneration, selectedSkills } from './dynamicAssessDraw';
+import { deepestCategoryCode } from './taxonomy';
 import { UploadService, detectFileMime, detectUrlMime } from './services/UploadService';
 import { TelemetryService } from './telemetry/TelemetryService';
 import type { TelemetryEvent } from './telemetry/telemetry.types';
@@ -54,7 +55,7 @@ function hasUsableContent(content: { artifactUrl?: string; primaryCategory?: str
 /** Dynamic Assess content whose saved skill/difficultyTarget differ from what its questions were generated for. */
 function isStaleGeneration(c: ContentData | null): boolean {
   return c?.primaryCategory === DYNAMIC_ASSESS_CATEGORY && Number(c.totalQuestions ?? 0) > 0
-    && isGenerationStale(c.body, toDifficultyTarget(c.difficultyTarget), c.skill);
+    && isGenerationStale(c.body, toDifficultyTarget(c.difficultyTarget), c.dynamicSkills);
 }
 
 /** Translates knowlg-service's per-skill pool rejection; its message is English-only ("Fewer than 6 Live questions found for skill(s): A, B"). */
@@ -64,6 +65,17 @@ function skillPoolErrorMessage(err: unknown, lang: string): string | null {
   const match = /Fewer than (\d+).*skill\(s\):\s*(.+)$/.exec(e.message ?? '');
   if (!match) return e.message ?? null;
   return tf(lang, 'ERROR_SKILL_POOL_TOO_SMALL', { needed: match[1] ?? '', skills: match[2] ?? '' });
+}
+
+/** Content with its in-memory Dynamic Assess selection read from the framework's skill field. */
+function withDynamicSkills(c: ContentData, skillField: string): ContentData {
+  return { ...c, dynamicSkills: selectedSkills(c, skillField) };
+}
+
+/** Content after a metadata save; a Dynamic save that wrote the skill field also moves the in-memory selection to it. */
+function applySavedFields(c: ContentData, fields: Record<string, unknown>, skillField: string | undefined, versionKey: string | undefined): ContentData {
+  const next = { ...c, ...fields, versionKey: versionKey ?? c.versionKey } as ContentData;
+  return skillField && skillField in fields ? withDynamicSkills(next, skillField) : next;
 }
 
 /** Dynamic Assess content the job hasn't generated questions for yet. */
@@ -161,6 +173,9 @@ export function useEditor(opts: UseEditorOptions) {
   // Lets saveMetadata (declared above refreshBody) start generation with the just-saved content.
   const generateRef = useRef<(c?: ContentData) => Promise<void>>(async () => {});
   const generatingRef = useRef(false);
+  /** Dynamic Assess: the field holding the selected skills, i.e. the framework's deepest category (e.g. "topic"), as the backend resolves it. */
+  const skillFieldRef = useRef('skill');
+  const skillFieldCache = useRef(new Map<string, string>());
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const mode: EditorMode = resolveMode(content?.status, context.user?.roles);
@@ -197,6 +212,21 @@ export function useEditor(opts: UseEditorOptions) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /** Dynamic Assess: the framework's deepest category code, where the selected skills are stored; falls back to "skill" like the backend's resolveCategoryCode. */
+  const resolveSkillField = async (framework: unknown): Promise<string> => {
+    const fw = typeof framework === 'string' ? framework : '';
+    if (!fw) return 'skill';
+    const cached = skillFieldCache.current.get(fw);
+    if (cached) return cached;
+    try {
+      const code = deepestCategoryCode(await service.readFramework(fw)) ?? 'skill';
+      skillFieldCache.current.set(fw, code);
+      return code;
+    } catch {
+      return 'skill'; // same fallback as the backend; not cached, so a later read can still resolve it
+    }
+  };
+
   /* ---- Initial load ---- */
   useEffect(() => {
     telemetry.current?.start('content-editor');
@@ -206,8 +236,13 @@ export function useEditor(opts: UseEditorOptions) {
     setBusy(true);
     service
       .readContent(initialId)
-      // Only Dynamic Assess needs its body (generated questions), so only it pays for a second read that includes it.
-      .then((c) => (c.primaryCategory === DYNAMIC_ASSESS_CATEGORY ? service.readContent(initialId, 'edit', { withBody: true }) : c))
+      // Only Dynamic Assess needs its body (generated questions) and its framework's skill field, so only it pays for a second read with them.
+      .then(async (c) => {
+        if (c.primaryCategory !== DYNAMIC_ASSESS_CATEGORY) return c;
+        const field = await resolveSkillField(c.framework);
+        skillFieldRef.current = field;
+        return withDynamicSkills(await service.readContent(initialId, 'edit', { withBody: true, extraFields: [field] }), field);
+      })
       .then((c) => {
         if (!mountedRef.current) return; // editor torn down mid-load
         telemetry.current?.setObject(c.identifier);
@@ -422,15 +457,17 @@ export function useEditor(opts: UseEditorOptions) {
   }, [content]);
 
   /* ---- Save metadata ---- */
+  /** `skillField`: the Dynamic Assess skill field the drawer wrote (its framework's deepest category), so the in-memory selection follows the save. */
   const saveMetadata = useCallback(
-    async (fields: Record<string, unknown>) => {
+    async (fields: Record<string, unknown>, opts: { skillField?: string } = {}) => {
       if (!content?.identifier) return;
       setBusy(true);
       setBusyAction('save-metadata');
       try {
         const res = await service.updateContent(content.identifier, fields, content.versionKey);
-        const merged = { ...content, ...fields, versionKey: res?.versionKey ?? content.versionKey } as ContentData;
-        setContent((c) => (c ? { ...c, ...fields, versionKey: res?.versionKey ?? c.versionKey } : c));
+        if (opts.skillField) skillFieldRef.current = opts.skillField;
+        const merged = applySavedFields(content, fields, opts.skillField, res?.versionKey);
+        setContent((c) => (c ? applySavedFields(c, fields, opts.skillField, res?.versionKey) : c));
         setDrawer(null);
         telemetry.current?.interact('modify', 'metadata', 'save');
         emit(EDITOR_EVENTS.SAVED, { id: content.identifier });
@@ -565,14 +602,15 @@ export function useEditor(opts: UseEditorOptions) {
 
   /** Saves edited metadata, re-validates against the review form, and only submits for review if valid. */
   const saveMetadataAndSubmit = useCallback(
-    async (fields: Record<string, unknown>) => {
+    async (fields: Record<string, unknown>, opts: { skillField?: string } = {}) => {
       if (!content?.identifier) return;
       setBusy(true);
       setBusyAction('save-submit');
       let merged: ContentData;
       try {
         const res = await service.updateContent(content.identifier, fields, content.versionKey);
-        merged = { ...content, ...fields, versionKey: res?.versionKey ?? content.versionKey } as ContentData;
+        if (opts.skillField) skillFieldRef.current = opts.skillField;
+        merged = applySavedFields(content, fields, opts.skillField, res?.versionKey);
         setContent(merged);
         telemetry.current?.interact('modify', 'metadata', 'save');
         emit(EDITOR_EVENTS.SAVED, { id: content.identifier });
@@ -732,12 +770,15 @@ export function useEditor(opts: UseEditorOptions) {
     if (!current?.identifier || generatingRef.current) return; // one generation at a time
 
     // Without saved inputs the job fails silently, which would show up ~60s later as a misleading "still in progress".
-    const skills = Array.isArray(current.skill) ? current.skill : [];
+    const skills = Array.isArray(current.dynamicSkills) ? current.dynamicSkills : [];
     if (!skills.length || difficultyTargetTotal(current.difficultyTarget) <= 0) {
       showToast(t(lang, 'ERROR_DYNAMIC_ASSESS_INPUTS'), 'error');
       return;
     }
     const id = current.identifier;
+    // Polled reads must carry the skill field too, or the refreshed content would lose the selection.
+    const skillField = skillFieldRef.current;
+    const readGenerated = () => service.readContent(id, 'edit', { withBody: true, extraFields: [skillField] }).then((c) => withDynamicSkills(c, skillField));
     // lastUpdatedOn changes on every job write even when the count doesn't.
     const snapshot = (c: ContentData | null) => `${String(c?.totalQuestions ?? '')}|${String(c?.lastUpdatedOn ?? '')}`;
     setDynamicAssessRefreshing(true);
@@ -758,7 +799,7 @@ export function useEditor(opts: UseEditorOptions) {
     let attempts = 0;
     let done = false;
     const poll = () => {
-      service.readContent(id, 'edit', { withBody: true }).then((updated) => {
+      readGenerated().then((updated) => {
         if (!mountedRef.current || done) return;
         if (snapshot(updated) !== baseline) {
           done = true;
@@ -779,7 +820,7 @@ export function useEditor(opts: UseEditorOptions) {
         clearInterval(interval);
         done = true; // a late in-flight response must not report "done" after "still pending"
         // One last read so the editor shows what the server has, even when the job wrote before the baseline read.
-        service.readContent(id, 'edit', { withBody: true })
+        readGenerated()
           .then((updated) => {
             if (!mountedRef.current) return;
             setContent(updated);

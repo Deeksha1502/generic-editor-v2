@@ -42,8 +42,8 @@ const READ_FIELDS = [
   'status', 'artifactUrl', 'streamingUrl', 'downloadUrl', 'appIcon', 'posterImage',
   'framework', 'board', 'medium', 'gradeLevel', 'subject', 'keywords', 'collaborators',
   'createdBy', 'creator', 'versionKey', 'pkgVersion', 'rejectReasons', 'rejectComment', 'channel',
-  /* Dynamic Assess fields (absent on other content); the knowlg-publish job sets totalQuestions and lastUpdatedOn. */
-  'skill', 'difficultyTarget', 'totalQuestions', 'lastUpdatedOn',
+  /* Dynamic Assess fields (absent on other content); the knowlg-publish job sets totalQuestions and lastUpdatedOn. The selected skills' field depends on the framework, so callers add it via extraFields. */
+  'difficultyTarget', 'totalQuestions', 'lastUpdatedOn',
 ].join(',');
 
 function toArray(val: unknown): string[] | undefined {
@@ -71,7 +71,6 @@ export function normalizeContent(raw: Record<string, unknown>): ContentData {
     collaborators: toArray(raw.collaborators),
     rejectReasons: toArray(raw.rejectReasons),
     board: typeof raw.board === 'string' ? raw.board : toArray(raw.board)?.[0],
-    skill: toArray(raw.skill),
   } as ContentData;
 }
 
@@ -181,9 +180,10 @@ export class ContentEditorService {
   /** GET content/v3/read/{id}?mode=edit — no-store, since this page re-reads its own content right after
    *  mutating it; also sends Cache-Control: no-cache so an intermediary gateway cache (e.g. Kong's
    *  proxy-cache plugin, which honors this request header) doesn't serve a pre-mutation response. */
-  async readContent(contentId: string, mode = 'edit', opts: { withBody?: boolean } = {}): Promise<ContentData> {
-    // body is opt-in (only Dynamic Assess needs it), so other content reads exactly the fields it always did.
-    const fields = opts.withBody ? `${READ_FIELDS},body` : READ_FIELDS;
+  async readContent(contentId: string, mode = 'edit', opts: { withBody?: boolean; extraFields?: string[] } = {}): Promise<ContentData> {
+    // body and extra fields are opt-in (only Dynamic Assess needs them), so other content reads exactly the fields it always did.
+    const extra = [...(opts.withBody ? ['body'] : []), ...(opts.extraFields ?? [])].filter((f) => f && !READ_FIELDS.split(',').includes(f));
+    const fields = extra.length ? `${READ_FIELDS},${[...new Set(extra)].join(',')}` : READ_FIELDS;
     const path = `${this.ep.read}/${encodeURIComponent(contentId)}?mode=${mode}&fields=${fields}`;
     const result = await this.request<{ content: Record<string, unknown> }>('GET', path, undefined, {
       cache: 'no-store',

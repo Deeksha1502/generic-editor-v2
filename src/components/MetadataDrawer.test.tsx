@@ -217,12 +217,13 @@ describe('<MetadataDrawer />', () => {
       const saveMetadata = vi.fn();
       const service = serviceWithSkill({
       });
-      const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service, saveMetadata, content: { ...baseContent, skill: ['physics'] } });
+      // The editor holds the selection read from the framework's skill category as dynamicSkills.
+      const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service, saveMetadata, content: { ...baseContent, dynamicSkills: ['physics'] } });
       render(<MetadataDrawer ed={ed} />);
       await screen.findByText('Difficulty Target');
       expect(await screen.findByText('physics')).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: /Save (changes|& Generate)/ }));
-      await waitFor(() => expect(saveMetadata).toHaveBeenCalledWith(expect.objectContaining({ skill: ['physics'] })));
+      await waitFor(() => expect(saveMetadata).toHaveBeenCalledWith(expect.objectContaining({ skill: ['physics'] }), { skillField: 'skill' }));
     });
 
     it('blocks a skill the job could not give its own minimum at the chosen levels, which would otherwise stay stale forever (positive)', async () => {
@@ -315,7 +316,7 @@ describe('<MetadataDrawer />', () => {
     });
   });
 
-  describe('skill binds to the framework\'s deepest category (Dynamic Assess)', () => {
+  describe('skills are selected in the framework\'s deepest category (Dynamic Assess)', () => {
     // Deepest category is 'topic' and there is no category coded 'skill', like a non-USF framework.
     const nonUsfService = (over: Record<string, unknown> = {}) => mockService({
       readFormFields: vi.fn().mockResolvedValue([
@@ -331,18 +332,19 @@ describe('<MetadataDrawer />', () => {
     });
     const content = { ...mockContent, primaryCategory: 'Dynamic Course Assessment', difficultyTarget: '{"E":2,"M":0,"D":0}' };
 
-    it('offers the deepest category\'s terms and checks the pool on that category (positive)', async () => {
+    it('offers the deepest category\'s terms under its own name, saves them in that category and checks the pool on it (positive)', async () => {
       const saveMetadata = vi.fn();
       const pool = vi.fn().mockResolvedValue({ Algebra: { E: 9, M: 9, D: 9 } });
       const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service: nonUsfService({ searchAssessmentItemBucketCounts: pool }), saveMetadata, content });
       render(<MetadataDrawer ed={ed} />);
-      fireEvent.click(await screen.findByRole('button', { name: /Select Skill/ }));
+      fireEvent.click(await screen.findByRole('button', { name: /Select Topic/ }));
       expect(await screen.findByText('Algebra')).toBeInTheDocument();
       expect(screen.getByText('Geometry')).toBeInTheDocument();
       expect(screen.queryByText('Maths')).not.toBeInTheDocument();
       fireEvent.click(screen.getByText('Algebra'));
       fireEvent.click(screen.getByRole('button', { name: /Save (changes|& Generate)/ }));
-      await waitFor(() => expect(saveMetadata).toHaveBeenCalledWith(expect.objectContaining({ skill: ['Algebra'] })));
+      await waitFor(() => expect(saveMetadata).toHaveBeenCalledWith(expect.objectContaining({ topic: ['Algebra'] }), { skillField: 'topic' }));
+      expect(saveMetadata.mock.calls[0][0]).not.toHaveProperty('skill');
       expect(pool).toHaveBeenCalledWith(['Algebra'], expect.anything(), 'topic');
     });
 
@@ -360,7 +362,7 @@ describe('<MetadataDrawer />', () => {
 
       const picker = await screen.findByLabelText('Framework') as HTMLSelectElement;
       await waitFor(() => expect(picker.value).toBe('BMGS'));
-      fireEvent.click(await screen.findByRole('button', { name: /Select Skill/ }));
+      fireEvent.click(await screen.findByRole('button', { name: /Select Topic/ }));
       fireEvent.click(await screen.findByText('Algebra'));
       fireEvent.mouseDown(document.body); // close the skill dropdown, as clicking elsewhere does
 
@@ -371,7 +373,7 @@ describe('<MetadataDrawer />', () => {
       expect(screen.queryByText('Algebra')).not.toBeInTheDocument();
 
       fireEvent.click(screen.getByRole('button', { name: /Save (changes|& Generate)/ }));
-      await waitFor(() => expect(saveMetadata).toHaveBeenCalledWith(expect.objectContaining({ framework: 'USF', skill: ['Physics'] })));
+      await waitFor(() => expect(saveMetadata).toHaveBeenCalledWith(expect.objectContaining({ framework: 'USF', skill: ['Physics'] }), { skillField: 'skill' }));
     });
 
     it('reloads the categories when the author picks the placeholder and then the same framework again (positive)', async () => {
@@ -385,7 +387,7 @@ describe('<MetadataDrawer />', () => {
       fireEvent.change(picker, { target: { value: '' } });
       fireEvent.change(picker, { target: { value: 'BMGS' } });
       await waitFor(() => expect(readFramework.mock.calls.length).toBeGreaterThan(callsBefore));
-      fireEvent.click(await screen.findByRole('button', { name: /Select Skill/ }));
+      fireEvent.click(await screen.findByRole('button', { name: /Select Topic/ }));
       expect(await screen.findByText('Algebra')).toBeInTheDocument();
     });
 
@@ -400,8 +402,8 @@ describe('<MetadataDrawer />', () => {
     it('does not fall back to a free-text box when no category is literally named skill (negative)', async () => {
       const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service: nonUsfService(), content });
       render(<MetadataDrawer ed={ed} />);
-      // Before this change the field rendered as a plain text input, with no "Select Skill" dropdown.
-      expect(await screen.findByRole('button', { name: /Select Skill/ })).toBeInTheDocument();
+      // The selection is a dropdown of the deepest category, never a plain text input.
+      expect(await screen.findByRole('button', { name: /Select Topic/ })).toBeInTheDocument();
     });
   });
 });

@@ -231,6 +231,17 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
     [categories],
   );
   const skillCategoryCode = useMemo(() => deepestCategoryCode(categories), [categories]);
+  // Dynamic Assess: the selection is the framework's deepest category, so the picker carries that category's name.
+  const skillCategoryLabel = ed.isDynamicAssess ? categories.find((c) => c.code === skillCategoryCode)?.name : undefined;
+  /** A form field for the deepest category itself, which the Dynamic skill picker already edits. */
+  const isReplacedBySkillPicker = (f: FormField) => ed.isDynamicAssess && !!skillCategoryCode && f.code === skillCategoryCode && !isSkillField(f);
+  const skillPickerCode = ed.isDynamicAssess ? fields.find(isSkillField)?.code : undefined;
+  /** Content as this save would leave it, with the picker's terms as the in-memory selection. */
+  const withSelection = (out: Record<string, unknown>) => ({
+    ...(content ?? {}),
+    ...out,
+    ...(skillPickerCode ? { dynamicSkills: multiVals[skillPickerCode] ?? [] } : {}),
+  });
 
   const setVal = (code: string, v: string) => setValues((s) => ({ ...s, [code]: v }));
   const setMulti = (code: string, v: string[]) => setMultiVals((s) => ({ ...s, [code]: v }));
@@ -252,7 +263,8 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
       if (f.code === 'name' || f.code === 'description') continue;
       if (f.code === 'appicon' || f.code === 'appIcon') continue;
       if (isDifficultyTargetField(f)) continue; // seeded separately below — see diffSeededRef
-      const cv = (content as Record<string, unknown>)[f.code];
+      // The Dynamic skill picker shows the selection read from the framework's skill field, not a field named "skill".
+      const cv = ed.isDynamicAssess && isSkillField(f) ? content.dynamicSkills : (content as Record<string, unknown>)[f.code];
       if (isMultiField(f, ed.isDynamicAssess)) {
         multi[f.code] = Array.isArray(cv) ? cv.map(String) : cv != null && cv !== '' ? [String(cv)] : [];
       } else {
@@ -279,8 +291,7 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
     setDiffTargets((s) => ({ ...s, ...diff }));
     const skill: Record<string, string[]> = {};
     for (const f of ed.isDynamicAssess ? fields.filter(isSkillField) : []) {
-      const cv = (content as Record<string, unknown>)[f.code];
-      skill[f.code] = Array.isArray(cv) ? cv.map(String) : cv != null && cv !== '' ? [String(cv)] : [];
+      skill[f.code] = content.dynamicSkills ?? [];
     }
     setMultiVals((s) => ({ ...s, ...skill }));
   }, [open, content, fields]);
@@ -322,6 +333,7 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
     const miss: string[] = [];
     for (const f of fields) {
       if (!f.required || f.editable === false || f.visible === false) continue;
+      if (isReplacedBySkillPicker(f)) continue;
       const code = f.code;
       let empty: boolean;
       if (code === 'appicon' || code === 'appIcon') empty = !appIcon;
@@ -347,6 +359,13 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
         out[f.code] = serializeDifficultyTarget(diffTargets[f.code] ?? { E: 0, M: 0, D: 0 });
         continue;
       }
+      if (isReplacedBySkillPicker(f)) continue;
+      if (ed.isDynamicAssess && isSkillField(f)) {
+        // Saved in the framework's deepest category field, where the backend reads the selection; left out until that field is known.
+        const arr = multiVals[f.code] ?? [];
+        if (skillCategoryCode) out[skillCategoryCode] = arr.length ? arr : undefined;
+        continue;
+      }
       if (isMultiField(f, ed.isDynamicAssess)) {
         const arr = multiVals[f.code] ?? [];
         out[f.code] = arr.length ? arr : undefined;
@@ -365,7 +384,7 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
   /** Blocks the save unless the job could generate these settings (its own allocation rules) and knowlg-service would accept every skill; returns true to proceed. */
   const checkPoolSufficiency = async (candidate: Record<string, unknown>): Promise<boolean> => {
     const target = toDifficultyTarget(candidate.difficultyTarget);
-    const skillValues = Array.isArray(candidate.skill) ? candidate.skill.map(String) : [];
+    const skillValues = Array.isArray(candidate.dynamicSkills) ? candidate.dynamicSkills.map(String) : [];
     const m = DYNAMIC_ASSESS_POOL_MULTIPLIER;
     let buckets: Record<string, Record<'E' | 'M' | 'D', number>>;
     let skillCounts: Record<string, number>;
@@ -420,7 +439,7 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
       if (miss.length) { setReviewErrors(miss); return; }
     }
     const out = buildOut();
-    const generates = needsGeneration({ ...(content ?? {}), ...out });
+    const generates = needsGeneration(withSelection(out));
     // Submitting can't also generate, so changed settings must be saved (and generated) first.
     if (reviewSubmitMode && generates) {
       showToast(t(lang, 'ERROR_DYNAMIC_ASSESS_SUBMIT_STALE'), 'error');
@@ -430,14 +449,16 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
       setChecking(true);
       try {
         // The pool is only checked when this save will generate, so other edits cost no extra searches.
-        if (!(await checkPoolSufficiency({ ...(content ?? {}), ...out }))) return;
+        if (!(await checkPoolSufficiency(withSelection(out)))) return;
       } finally {
         setChecking(false);
       }
     }
     setReviewErrors([]);
-    if (reviewSubmitMode) saveMetadataAndSubmit(out);
-    else saveMetadata(out);
+    // Only a Dynamic save names the skill field it wrote; other content keeps the plain call.
+    const args: [Record<string, unknown>, { skillField?: string }?] = ed.isDynamicAssess ? [out, { skillField: skillCategoryCode }] : [out];
+    if (reviewSubmitMode) saveMetadataAndSubmit(...args);
+    else saveMetadata(...args);
   };
 
   const onClose = () => { setReviewErrors([]); setReviewSubmitMode(false); setDrawer(null); };
@@ -492,8 +513,8 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
             </div>
           )}
           <MultiSelect
-            label={label}
-            placeholder={skillCategoryCode ? (placeholder || `Select ${label}`) : t(lang, 'DYNAMIC_ASSESS_SELECT_FRAMEWORK_FIRST')}
+            label={skillCategoryLabel ?? label}
+            placeholder={skillCategoryCode ? (placeholder || `Select ${skillCategoryLabel ?? label}`) : t(lang, 'DYNAMIC_ASSESS_SELECT_FRAMEWORK_FIRST')}
             required={required}
             disabled={disabled || !skillCategoryCode}
             values={multiVals[code] ?? []}
@@ -572,10 +593,10 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
   };
 
   // Live label: tells the author when Save will also generate questions.
-  const saveGenerates = ed.isDynamicAssess && open && needsGeneration({ ...(content ?? {}), ...buildOut() });
+  const saveGenerates = ed.isDynamicAssess && open && needsGeneration(withSelection(buildOut()));
 
   // Skill always renders with the other fields (under its framework picker), even when a framework names a category 'skill'.
-  const taxoFields = fields.filter((f) => taxoCodes.has(f.code) && !(ed.isDynamicAssess && isSkillField(f)));
+  const taxoFields = fields.filter((f) => taxoCodes.has(f.code) && !(ed.isDynamicAssess && isSkillField(f)) && !isReplacedBySkillPicker(f));
   const nonTaxoFields = fields.filter(
     (f) => (!taxoCodes.has(f.code) || (ed.isDynamicAssess && isSkillField(f))) && f.code !== 'appicon' && f.code !== 'appIcon',
   );
