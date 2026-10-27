@@ -161,7 +161,7 @@ describe('<MetadataDrawer />', () => {
       await selectPhysicsSkill();
       fireEvent.click(screen.getByRole('button', { name: /Save (changes|& Generate)/ }));
       await waitFor(() => expect(showToast).toHaveBeenCalledWith(
-        expect.stringContaining('Easy: requested 2 needs 6, available 0'), 'error',
+        expect.stringContaining('Easy: requested 2 needs 4, available 0'), 'error',
       ));
       expect(saveMetadata).not.toHaveBeenCalled();
     });
@@ -182,8 +182,8 @@ describe('<MetadataDrawer />', () => {
       const saveMetadata = vi.fn();
       const showToast = vi.fn();
       const service = serviceWithSkill({
-        // 5 Easy items exist but only floor(5/3)=1 can be drawn per the job's multiplier rule.
-        searchAssessmentItemBucketCounts: vi.fn().mockResolvedValue({ physics: { E: 5, M: 0, D: 0 } }),
+        // 3 Easy items exist but only floor(3/2)=1 can be drawn per the job's multiplier rule.
+        searchAssessmentItemBucketCounts: vi.fn().mockResolvedValue({ physics: { E: 3, M: 0, D: 0 } }),
       });
       const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service, saveMetadata, showToast, content: baseContent });
       render(<MetadataDrawer ed={ed} />);
@@ -191,7 +191,7 @@ describe('<MetadataDrawer />', () => {
       await selectPhysicsSkill();
       fireEvent.click(screen.getByRole('button', { name: /Save (changes|& Generate)/ }));
       await waitFor(() => expect(showToast).toHaveBeenCalledWith(
-        expect.stringContaining('Easy: requested 2 needs 6, available 3'), 'error',
+        expect.stringContaining('Easy: requested 2 needs 4, available 2'), 'error',
       ));
       expect(saveMetadata).not.toHaveBeenCalled();
     });
@@ -200,7 +200,7 @@ describe('<MetadataDrawer />', () => {
       const saveMetadata = vi.fn();
       const showToast = vi.fn();
       const service = serviceWithSkill({
-        searchSkillPoolCounts: vi.fn().mockResolvedValue({ physics: 5 }),
+        searchSkillPoolCounts: vi.fn().mockResolvedValue({ physics: 3 }),
       });
       const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service, saveMetadata, showToast, content: baseContent });
       render(<MetadataDrawer ed={ed} />);
@@ -208,7 +208,7 @@ describe('<MetadataDrawer />', () => {
       await selectPhysicsSkill();
       fireEvent.click(screen.getByRole('button', { name: /Save (changes|& Generate)/ }));
       await waitFor(() => expect(showToast).toHaveBeenCalledWith(
-        'Each skill needs at least 6 Live questions. Too few for: physics', 'error',
+        'Each skill needs at least 4 Live questions. Too few for: physics', 'error',
       ));
       expect(saveMetadata).not.toHaveBeenCalled();
     });

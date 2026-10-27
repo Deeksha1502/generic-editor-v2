@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ecmlBodyForUser, pickForLearner, isGenerationStale, needsGeneration, selectedSkills, dynamicAssessSettings } from './dynamicAssessDraw';
+import { DYNAMIC_ASSESS_MIN_CRITERIA, DYNAMIC_ASSESS_POOL_MULTIPLIER } from './constants';
 
 const levels: Record<string, string> = { a1: 'EASY', a2: 'EASY', a3: 'EASY', b1: 'MEDIUM', b2: 'MEDIUM', b3: 'MEDIUM' };
 const body = (dynamic: boolean) => ({
@@ -112,9 +113,9 @@ describe('dynamicAssessSettings', () => {
   });
 
   it('falls back to the defaults for older content or unusable values (negative)', () => {
-    expect(dynamicAssessSettings(null)).toEqual({ minCriteria: 2, multiplier: 3 });
-    expect(dynamicAssessSettings({})).toEqual({ minCriteria: 2, multiplier: 3 });
-    expect(dynamicAssessSettings({ minCriteria: -1, multiplier: 0 })).toEqual({ minCriteria: 2, multiplier: 3 });
-    expect(dynamicAssessSettings({ minCriteria: 'abc', multiplier: '' })).toEqual({ minCriteria: 2, multiplier: 3 });
+    expect(dynamicAssessSettings(null)).toEqual({ minCriteria: DYNAMIC_ASSESS_MIN_CRITERIA, multiplier: DYNAMIC_ASSESS_POOL_MULTIPLIER });
+    expect(dynamicAssessSettings({})).toEqual({ minCriteria: DYNAMIC_ASSESS_MIN_CRITERIA, multiplier: DYNAMIC_ASSESS_POOL_MULTIPLIER });
+    expect(dynamicAssessSettings({ minCriteria: -1, multiplier: 0 })).toEqual({ minCriteria: DYNAMIC_ASSESS_MIN_CRITERIA, multiplier: DYNAMIC_ASSESS_POOL_MULTIPLIER });
+    expect(dynamicAssessSettings({ minCriteria: 'abc', multiplier: '' })).toEqual({ minCriteria: DYNAMIC_ASSESS_MIN_CRITERIA, multiplier: DYNAMIC_ASSESS_POOL_MULTIPLIER });
   });
 });
