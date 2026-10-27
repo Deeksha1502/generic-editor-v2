@@ -6,9 +6,8 @@ import { t, tf } from '../i18n/i18n';
 import { cascadedOptions, deepestCategoryCode } from '../taxonomy';
 import { PencilIcon, ChevronDown, ImageIcon, CheckIcon } from '../icons';
 import { type DifficultyTarget, toDifficultyTarget, serializeDifficultyTarget } from '../difficultyTarget';
-import { needsGeneration } from '../dynamicAssessDraw';
+import { dynamicAssessSettings, needsGeneration } from '../dynamicAssessDraw';
 import { planPool } from '../poolPlan';
-import { DYNAMIC_ASSESS_MIN_CRITERIA, DYNAMIC_ASSESS_POOL_MULTIPLIER } from '../constants';
 
 /**
  * Multi-value field? Driven by the form definition, not a hardcoded list — a field
@@ -66,6 +65,25 @@ const DifficultyTargetInput: React.FC<{
             />
           </div>
         ))}
+      </div>
+    </div>
+  );
+};
+
+/** Dynamic Assess: shows the per-skill minimum against the live Difficulty Target, so a too-small total is visible before Save rejects it. */
+export const MinimumPerSkillPanel: React.FC<{
+  lang: string; minCriteria: number; skillCount: number; target: DifficultyTarget;
+}> = ({ lang, minCriteria, skillCount, target }) => {
+  const total = (target.E ?? 0) + (target.M ?? 0) + (target.D ?? 0);
+  const minimum = minCriteria * skillCount;
+  const short = total < minimum;
+  return (
+    <div className={`ce-min-skill${short ? ' ce-min-skill--short' : ''}`} role="status">
+      <p className="ce-min-skill-title">{t(lang, 'MIN_PER_SKILL_TITLE')}</p>
+      <p className="ce-min-skill-sub">{tf(lang, short ? 'MIN_PER_SKILL_SHORT' : 'MIN_PER_SKILL_OK', { min: minCriteria, minimum })}</p>
+      <div className="ce-min-skill-foot">
+        <span>{tf(lang, 'MIN_PER_SKILL_TOTALS', { total, minimum })}</span>
+        {short && <span className="ce-min-skill-badge">{t(lang, 'MIN_PER_SKILL_NEEDS_ADJUSTMENT')}</span>}
       </div>
     </div>
   );
@@ -236,6 +254,8 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
   /** A form field for the deepest category itself, which the Dynamic skill picker already edits. */
   const isReplacedBySkillPicker = (f: FormField) => ed.isDynamicAssess && !!skillCategoryCode && f.code === skillCategoryCode && !isSkillField(f);
   const skillPickerCode = ed.isDynamicAssess ? fields.find(isSkillField)?.code : undefined;
+  // This content's own rules (knowlg-service stores them at create), so the panel and pool check match what the job enforces.
+  const { minCriteria, multiplier } = dynamicAssessSettings(content as Record<string, unknown> | null);
   /** Content as this save would leave it, with the picker's terms as the in-memory selection. */
   const withSelection = (out: Record<string, unknown>) => ({
     ...(content ?? {}),
@@ -385,7 +405,7 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
   const checkPoolSufficiency = async (candidate: Record<string, unknown>): Promise<boolean> => {
     const target = toDifficultyTarget(candidate.difficultyTarget);
     const skillValues = Array.isArray(candidate.dynamicSkills) ? candidate.dynamicSkills.map(String) : [];
-    const m = DYNAMIC_ASSESS_POOL_MULTIPLIER;
+    const m = multiplier;
     let buckets: Record<string, Record<'E' | 'M' | 'D', number>>;
     let skillCounts: Record<string, number>;
     try {
@@ -398,9 +418,9 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
       showToast(t(lang, 'ERROR_POOL_CHECK_FAILED'), 'error');
       return false;
     }
-    const plan = planPool(skillValues, target, (s, l) => buckets[s]?.[l] ?? 0, DYNAMIC_ASSESS_MIN_CRITERIA, m);
+    const plan = planPool(skillValues, target, (s, l) => buckets[s]?.[l] ?? 0, minCriteria, m);
     if (plan.infeasible) {
-      showToast(tf(lang, 'ERROR_TOO_MANY_SKILLS', { count: skillValues.length, needed: skillValues.length * DYNAMIC_ASSESS_MIN_CRITERIA, min: DYNAMIC_ASSESS_MIN_CRITERIA }), 'error');
+      showToast(tf(lang, 'ERROR_TOO_MANY_SKILLS', { count: skillValues.length, needed: skillValues.length * minCriteria, min: minCriteria }), 'error');
       return false;
     }
     if (plan.uncovered.length) {
@@ -416,7 +436,7 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
       return false;
     }
     // Same per-skill floor knowlg-service enforces at Generate, so it fails here, translated, instead of after a successful save.
-    const perSkill = DYNAMIC_ASSESS_MIN_CRITERIA * m;
+    const perSkill = minCriteria * m;
     const shortSkills = skillValues.filter((s) => (skillCounts[s] ?? 0) < perSkill);
     if (shortSkills.length) {
       showToast(tf(lang, 'ERROR_SKILL_POOL_TOO_SMALL', { needed: perSkill, skills: shortSkills.join(', ') }), 'error');
@@ -474,16 +494,22 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
     if (code === 'appicon' || code === 'appIcon') return null; // rendered in the top block
 
     if (isDifficultyTargetField(f)) {
+      const target = diffTargets[code] ?? { E: 0, M: 0, D: 0 };
+      const skillCount = skillPickerCode ? (multiVals[skillPickerCode] ?? []).length : 0;
       return (
-        <DifficultyTargetInput
-          key={code}
-          lang={lang}
-          label={label}
-          required={required}
-          disabled={disabled}
-          value={diffTargets[code] ?? { E: 0, M: 0, D: 0 }}
-          onChange={(v) => setDiffTargets((s) => ({ ...s, [code]: v }))}
-        />
+        <React.Fragment key={code}>
+          <DifficultyTargetInput
+            lang={lang}
+            label={label}
+            required={required}
+            disabled={disabled}
+            value={target}
+            onChange={(v) => setDiffTargets((s) => ({ ...s, [code]: v }))}
+          />
+          {ed.isDynamicAssess && skillCount > 0 && (
+            <MinimumPerSkillPanel lang={lang} minCriteria={minCriteria} skillCount={skillCount} target={target} />
+          )}
+        </React.Fragment>
       );
     }
 

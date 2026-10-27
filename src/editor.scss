@@ -1097,6 +1097,51 @@
   line-height: 1.45;
 }
 
+// Dynamic Assess per-skill minimum, under the Difficulty Target inputs; amber like the stale banner only while the total is too low.
+.ce-min-skill {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--ce-border);
+  background: var(--ce-bg);
+  color: var(--ce-ink);
+  font-size: 13px;
+}
+
+.ce-min-skill--short {
+  border-color: #f0c96b;
+  background: #fffbeb;
+  color: #7a4f05;
+}
+
+.ce-min-skill-title {
+  margin: 0;
+  font-weight: 700;
+}
+
+.ce-min-skill-sub {
+  margin: 2px 0 0;
+  line-height: 1.45;
+}
+
+.ce-min-skill-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.ce-min-skill-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fee2e2;
+  color: var(--ce-danger);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .ce-generating-overlay {
   position: absolute;
   inset: 0;

@@ -253,6 +253,32 @@ describe('<MetadataDrawer />', () => {
       expect(saveMetadata).not.toHaveBeenCalled();
     });
 
+    it("checks the pool with the content's own multiplier, not the default (positive)", async () => {
+      const saveMetadata = vi.fn();
+      const showToast = vi.fn();
+      // 9 Easy items cover 2 at the default x3, but not at this content's x5.
+      const service = serviceWithSkill({ searchAssessmentItemBucketCounts: vi.fn().mockResolvedValue({ physics: { E: 9, M: 0, D: 0 } }) });
+      const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service, saveMetadata, showToast, content: { ...baseContent, multiplier: 5 } });
+      render(<MetadataDrawer ed={ed} />);
+      await screen.findByText('Difficulty Target');
+      await selectPhysicsSkill();
+      fireEvent.click(screen.getByRole('button', { name: /Save & Generate/ }));
+      await waitFor(() => expect(showToast).toHaveBeenCalledWith(expect.stringContaining('Easy: requested 2 needs 10, available 5'), 'error'));
+      expect(saveMetadata).not.toHaveBeenCalled();
+    });
+
+    it("applies the content's own minCriteria to the target and the per-skill floor (positive)", async () => {
+      const showToast = vi.fn();
+      const content = { ...baseContent, difficultyTarget: '{"E":4,"M":0,"D":0}', minCriteria: '4', multiplier: 2 };
+      const service = serviceWithSkill({ searchSkillPoolCounts: vi.fn().mockResolvedValue({ physics: 7 }) });
+      const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service, showToast, content });
+      render(<MetadataDrawer ed={ed} />);
+      await screen.findByText('Difficulty Target');
+      await selectPhysicsSkill();
+      fireEvent.click(screen.getByRole('button', { name: /Save & Generate/ }));
+      await waitFor(() => expect(showToast).toHaveBeenCalledWith('Each skill needs at least 8 Live questions. Too few for: physics', 'error'));
+    });
+
     it('saves only once when Save & Generate is clicked twice during the pool check (negative)', async () => {
       const saveMetadata = vi.fn();
       let release: () => void = () => {};
@@ -313,6 +339,51 @@ describe('<MetadataDrawer />', () => {
       fireEvent.click(screen.getByRole('button', { name: /Save changes/ }));
       await waitFor(() => expect(saveMetadata).toHaveBeenCalled());
       expect(searchAssessmentItemBucketCounts).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('minimum questions per skill panel (Dynamic Assess)', () => {
+    const service = () => mockService({
+      readFormFields: vi.fn().mockResolvedValue([
+        { code: 'name', inputType: 'text', label: 'Title', required: true, visible: true, editable: true },
+        { code: 'skill', inputType: 'multiSelect', label: 'Skill', required: true, visible: true, editable: true },
+        { code: 'difficultyTarget', label: 'Difficulty Target', required: true, visible: true, editable: true },
+      ]),
+      readFramework: vi.fn().mockResolvedValue([
+        { code: 'skill', name: 'Skill', index: 1, terms: [{ code: 'physics', name: 'physics' }, { code: 'chemistry', name: 'chemistry' }] },
+      ]),
+    });
+    const dynamic = { ...mockContent, primaryCategory: 'Dynamic Course Assessment', difficultyTarget: '{"E":1,"M":1,"D":1}', dynamicSkills: ['physics'] };
+
+    it("shows the content's minimum against the live total and flags it when too low (positive)", async () => {
+      render(<MetadataDrawer ed={makeEd({ isDynamicAssess: true, drawer: 'metadata', service: service(), content: { ...dynamic, minCriteria: 4 } })} />);
+      expect(await screen.findByText('Minimum questions per skill')).toBeInTheDocument();
+      expect(screen.getByText('Total: 3 · Minimum: 4')).toBeInTheDocument();
+      expect(screen.getByText('Each selected skill needs at least 4 questions; increase the total to at least 4.')).toBeInTheDocument();
+      expect(screen.getByText('Needs adjustment')).toBeInTheDocument();
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Easy' }), { target: { value: '2' } });
+      expect(screen.getByText('Total: 4 · Minimum: 4')).toBeInTheDocument();
+      expect(screen.queryByText('Needs adjustment')).toBeNull();
+      expect(screen.getByText('Each selected skill needs at least 4 questions.')).toBeInTheDocument();
+    });
+
+    it('multiplies the minimum by the number of selected skills, defaulting minCriteria to 2 (positive)', async () => {
+      render(<MetadataDrawer ed={makeEd({ isDynamicAssess: true, drawer: 'metadata', service: service(), content: { ...dynamic, dynamicSkills: ['physics', 'chemistry'] } })} />);
+      expect(await screen.findByText('Total: 3 · Minimum: 4')).toBeInTheDocument();
+      expect(screen.getByText('Needs adjustment')).toBeInTheDocument();
+    });
+
+    it('is hidden until a skill is selected (negative)', async () => {
+      render(<MetadataDrawer ed={makeEd({ isDynamicAssess: true, drawer: 'metadata', service: service(), content: { ...dynamic, dynamicSkills: [] } })} />);
+      await screen.findByText('Difficulty Target');
+      expect(screen.queryByText('Minimum questions per skill')).toBeNull();
+    });
+
+    it('is never shown for non-Dynamic content (negative)', async () => {
+      const content = { ...mockContent, primaryCategory: 'Learning Resource', difficultyTarget: '{"E":1,"M":0,"D":0}', skill: ['physics'] };
+      render(<MetadataDrawer ed={makeEd({ isDynamicAssess: false, drawer: 'metadata', service: service(), content })} />);
+      await screen.findByText('Difficulty Target');
+      expect(screen.queryByText('Minimum questions per skill')).toBeNull();
     });
   });
 

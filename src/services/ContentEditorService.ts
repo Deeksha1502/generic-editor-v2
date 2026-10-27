@@ -42,8 +42,8 @@ const READ_FIELDS = [
   'status', 'artifactUrl', 'streamingUrl', 'downloadUrl', 'appIcon', 'posterImage',
   'framework', 'board', 'medium', 'gradeLevel', 'subject', 'keywords', 'collaborators',
   'createdBy', 'creator', 'versionKey', 'pkgVersion', 'rejectReasons', 'rejectComment', 'channel',
-  /* Dynamic Assess fields (absent on other content); the knowlg-publish job sets totalQuestions and lastUpdatedOn. The selected skills' field depends on the framework, so callers add it via extraFields. */
-  'difficultyTarget', 'totalQuestions', 'lastUpdatedOn',
+  /* Dynamic Assess fields (absent on other content); the knowlg-publish job sets totalQuestions and lastUpdatedOn, knowlg-service sets minCriteria and multiplier at create. The selected skills' field depends on the framework, so callers add it via extraFields. */
+  'difficultyTarget', 'totalQuestions', 'lastUpdatedOn', 'minCriteria', 'multiplier',
 ].join(',');
 
 function toArray(val: unknown): string[] | undefined {

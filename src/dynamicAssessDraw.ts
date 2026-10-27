@@ -1,5 +1,7 @@
 // Same seeded draw as the portal's dynamicAssessSubset, so the preview shows the user the exact set they'd play; the full pool is never displayed.
 
+import { DYNAMIC_ASSESS_MIN_CRITERIA, DYNAMIC_ASSESS_POOL_MULTIPLIER } from './constants';
+
 const LEVELS = [['E', 'EASY'], ['M', 'MEDIUM'], ['D', 'DIFFICULT']] as const;
 type AnyRecord = Record<string, any>;
 
@@ -69,6 +71,15 @@ function parseTarget(raw: unknown): AnyRecord {
   let value = raw;
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = undefined; } }
   return value && typeof value === 'object' ? (value as AnyRecord) : {};
+}
+
+/** The content's own minCriteria/multiplier (stored at create by knowlg-service), or the defaults for content created before they were, or holding unusable values; mirrors the publish job's nodeSetting. */
+export function dynamicAssessSettings(c: Record<string, unknown> | null | undefined): { minCriteria: number; multiplier: number } {
+  const read = (v: unknown, min: number, fallback: number) => {
+    const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
+    return Number.isFinite(n) && Math.trunc(n) >= min ? Math.trunc(n) : fallback;
+  };
+  return { minCriteria: read(c?.minCriteria, 0, DYNAMIC_ASSESS_MIN_CRITERIA), multiplier: read(c?.multiplier, 1, DYNAMIC_ASSESS_POOL_MULTIPLIER) };
 }
 
 /** The selected skills: the terms in the framework's deepest category field (`skillField`, e.g. "topic"), the same field the backend reads them from. */

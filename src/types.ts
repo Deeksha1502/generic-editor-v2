@@ -86,6 +86,9 @@ export interface ContentData {
   dynamicSkills?: string[];
   /** Dynamic Assess custom field (Dynamic Course Assessment category only). */
   difficultyTarget?: { E?: number; M?: number; D?: number };
+  /** Dynamic Assess only, set by knowlg-service at create; read through dynamicAssessSettings, which falls back for older content. */
+  minCriteria?: number;
+  multiplier?: number;
   /** Any extra fields returned by content read. */
   [key: string]: unknown;
 }

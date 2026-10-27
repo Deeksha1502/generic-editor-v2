@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ecmlBodyForUser, pickForLearner, isGenerationStale, needsGeneration, selectedSkills } from './dynamicAssessDraw';
+import { ecmlBodyForUser, pickForLearner, isGenerationStale, needsGeneration, selectedSkills, dynamicAssessSettings } from './dynamicAssessDraw';
 
 const levels: Record<string, string> = { a1: 'EASY', a2: 'EASY', a3: 'EASY', b1: 'MEDIUM', b2: 'MEDIUM', b3: 'MEDIUM' };
 const body = (dynamic: boolean) => ({
@@ -102,5 +102,19 @@ describe('selectedSkills and needsGeneration (the selection lives in the framewo
     expect(needsGeneration({ ...base, dynamicSkills: ['Algebra'] })).toBe(true);
     expect(needsGeneration({ ...base, skill: ['Algebra'] } as never)).toBe(false);
     expect(needsGeneration({ ...base, primaryCategory: 'Learning Resource', dynamicSkills: ['Algebra'] })).toBe(false);
+  });
+});
+
+describe('dynamicAssessSettings', () => {
+  it("reads the content's own minCriteria and multiplier, as numbers or numeric strings (positive)", () => {
+    expect(dynamicAssessSettings({ minCriteria: 4, multiplier: '5' })).toEqual({ minCriteria: 4, multiplier: 5 });
+    expect(dynamicAssessSettings({ minCriteria: '0', multiplier: 2.0 })).toEqual({ minCriteria: 0, multiplier: 2 });
+  });
+
+  it('falls back to the defaults for older content or unusable values (negative)', () => {
+    expect(dynamicAssessSettings(null)).toEqual({ minCriteria: 2, multiplier: 3 });
+    expect(dynamicAssessSettings({})).toEqual({ minCriteria: 2, multiplier: 3 });
+    expect(dynamicAssessSettings({ minCriteria: -1, multiplier: 0 })).toEqual({ minCriteria: 2, multiplier: 3 });
+    expect(dynamicAssessSettings({ minCriteria: 'abc', multiplier: '' })).toEqual({ minCriteria: 2, multiplier: 3 });
   });
 });
