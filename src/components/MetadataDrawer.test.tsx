@@ -385,6 +385,58 @@ describe('<MetadataDrawer />', () => {
       await screen.findByText('Difficulty Target');
       expect(screen.queryByText('Minimum questions per skill')).toBeNull();
     });
+
+    describe('"See an example"', () => {
+      const withCounts = () => {
+        const searchAssessmentItemBucketCounts = vi.fn().mockResolvedValue({});
+        const searchSkillPoolCounts = vi.fn().mockResolvedValue({});
+        return { svc: mockService({ ...service(), searchAssessmentItemBucketCounts, searchSkillPoolCounts }), searchAssessmentItemBucketCounts, searchSkillPoolCounts };
+      };
+      const open = async (content: Record<string, unknown>, svc = withCounts().svc) => {
+        render(<MetadataDrawer ed={makeEd({ isDynamicAssess: true, drawer: 'metadata', service: svc, content })} />);
+        fireEvent.click(await screen.findByRole('button', { name: /See an example/ }));
+      };
+
+      it('is collapsed by default (negative)', async () => {
+        render(<MetadataDrawer ed={makeEd({ isDynamicAssess: true, drawer: 'metadata', service: withCounts().svc, content: dynamic })} />);
+        await screen.findByText('Minimum questions per skill');
+        expect(screen.queryByText(/^Example: you pick 2 skills/)).toBeNull();
+      });
+
+      it('explains the rule with a fixed example for minCriteria 2 (positive)', async () => {
+        await open(dynamic);
+        expect(screen.getByText('Example: you pick 2 skills and ask for 2 Easy, 2 Medium and 2 Difficult.')).toBeInTheDocument();
+        expect(screen.getByText('Each learner gets 6 questions.')).toBeInTheDocument();
+        expect(screen.getByText('Minimum 2 questions will come from each skill.')).toBeInTheDocument();
+      });
+
+      it("follows the content's own minCriteria (3) (positive)", async () => {
+        await open({ ...dynamic, minCriteria: 3 });
+        expect(screen.getByText('Example: you pick 2 skills and ask for 3 Easy, 3 Medium and 3 Difficult.')).toBeInTheDocument();
+        expect(screen.getByText('Each learner gets 9 questions.')).toBeInTheDocument();
+        expect(screen.getByText('Minimum 3 questions will come from each skill.')).toBeInTheDocument();
+      });
+
+      it("doesn't change with the creator's skills or target (negative)", async () => {
+        await open({ ...dynamic, dynamicSkills: ['physics', 'chemistry'], difficultyTarget: '{"E":5,"M":0,"D":1}' });
+        expect(screen.getByText('Example: you pick 2 skills and ask for 2 Easy, 2 Medium and 2 Difficult.')).toBeInTheDocument();
+        expect(screen.getByText('Each learner gets 6 questions.')).toBeInTheDocument();
+      });
+
+      it('runs no searches when opened (negative)', async () => {
+        const { svc, searchAssessmentItemBucketCounts, searchSkillPoolCounts } = withCounts();
+        await open(dynamic, svc);
+        await new Promise((r) => setTimeout(r, 700));
+        expect(searchAssessmentItemBucketCounts).not.toHaveBeenCalled();
+        expect(searchSkillPoolCounts).not.toHaveBeenCalled();
+      });
+
+      it('hides the example again (negative)', async () => {
+        await open(dynamic);
+        fireEvent.click(screen.getByRole('button', { name: /Hide/ }));
+        expect(screen.queryByText('Each learner gets 6 questions.')).toBeNull();
+      });
+    });
   });
 
   describe('skills are selected in the framework\'s deepest category (Dynamic Assess)', () => {

@@ -70,20 +70,63 @@ const DifficultyTargetInput: React.FC<{
   );
 };
 
-/** Dynamic Assess: shows the per-skill minimum against the live Difficulty Target, so a too-small total is visible before Save rejects it. */
+/** Live pool counts the job allocates from: per skill x level, and per skill overall (knowlg-service's floor). */
+export interface PoolCounts { buckets: Record<string, Record<'E' | 'M' | 'D', number>>; skillCounts: Record<string, number> }
+
+/** Why the job couldn't generate these settings (the first problem, in the order Save reports them), or null; shared by Save's check and the panel's example. */
+export function poolProblem(
+  lang: string, skills: string[], target: DifficultyTarget, counts: PoolCounts, minCriteria: number, multiplier: number,
+): string | null {
+  const { buckets, skillCounts } = counts;
+  const plan = planPool(skills, target, (s, l) => buckets[s]?.[l] ?? 0, minCriteria, multiplier);
+  if (plan.infeasible) {
+    return tf(lang, 'ERROR_TOO_MANY_SKILLS', { count: skills.length, needed: skills.length * minCriteria, min: minCriteria });
+  }
+  if (plan.uncovered.length) {
+    const levelKey = { E: 'DIFFICULTY_EASY', M: 'DIFFICULTY_MEDIUM', D: 'DIFFICULTY_DIFFICULT' } as const;
+    const lines = plan.uncovered.map(({ level, covered, target: requested }) =>
+      tf(lang, 'ERROR_POOL_SHORTFALL', { level: t(lang, levelKey[level]), requested, needed: requested * multiplier, available: covered * multiplier }));
+    return `${t(lang, 'ERROR_POOL_INSUFFICIENT')}: ${lines.join('; ')}`;
+  }
+  // A skill that can't get its own minimum would be left out of the pool, and the settings would then never match the questions.
+  if (plan.shortSkills.length) return tf(lang, 'ERROR_SKILL_LEVELS_SHORT', { skills: plan.shortSkills.join(', ') });
+  // Same per-skill floor knowlg-service enforces at Generate, so it fails here, translated, instead of after a successful save.
+  const perSkill = minCriteria * multiplier;
+  const shortSkills = skills.filter((s) => (skillCounts[s] ?? 0) < perSkill);
+  return shortSkills.length ? tf(lang, 'ERROR_SKILL_POOL_TOO_SMALL', { needed: perSkill, skills: shortSkills.join(', ') }) : null;
+}
+
+/** Dynamic Assess: shows the per-skill minimum against the live Difficulty Target, so a too-small total is visible before Save rejects it; "See an example" explains the rule with a fixed example. */
 export const MinimumPerSkillPanel: React.FC<{
   lang: string; minCriteria: number; skillCount: number; target: DifficultyTarget;
 }> = ({ lang, minCriteria, skillCount, target }) => {
+  const [expanded, setExpanded] = useState(false);
   const total = (target.E ?? 0) + (target.M ?? 0) + (target.D ?? 0);
   const minimum = minCriteria * skillCount;
   const short = total < minimum;
+  // Fixed example (2 skills, n per level), independent of what the creator entered; only the system's minCriteria feeds it.
+  const n = Math.max(minCriteria, 1);
   return (
     <div className={`ce-min-skill${short ? ' ce-min-skill--short' : ''}`} role="status">
       <p className="ce-min-skill-title">{t(lang, 'MIN_PER_SKILL_TITLE')}</p>
       <p className="ce-min-skill-sub">{tf(lang, short ? 'MIN_PER_SKILL_SHORT' : 'MIN_PER_SKILL_OK', { min: minCriteria, minimum })}</p>
+      {expanded && (
+        <div className="ce-min-skill-example">
+          <p>{tf(lang, 'MIN_PER_SKILL_EX_INTRO', { n })}</p>
+          <ul>
+            <li>{tf(lang, 'MIN_PER_SKILL_EX_TOTAL', { total: 3 * n })}</li>
+            <li>{tf(lang, 'MIN_PER_SKILL_EX_EACH', { min: minCriteria })}</li>
+          </ul>
+        </div>
+      )}
       <div className="ce-min-skill-foot">
         <span>{tf(lang, 'MIN_PER_SKILL_TOTALS', { total, minimum })}</span>
-        {short && <span className="ce-min-skill-badge">{t(lang, 'MIN_PER_SKILL_NEEDS_ADJUSTMENT')}</span>}
+        <span className="ce-min-skill-actions">
+          {short && <span className="ce-min-skill-badge">{t(lang, 'MIN_PER_SKILL_NEEDS_ADJUSTMENT')}</span>}
+          <button type="button" className="ce-min-skill-toggle" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
+            {expanded ? `${t(lang, 'MIN_PER_SKILL_HIDE_EXAMPLE')} ▴` : `${t(lang, 'MIN_PER_SKILL_SEE_EXAMPLE')} ▾`}
+          </button>
+        </span>
       </div>
     </div>
   );
@@ -402,44 +445,29 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
   };
 
   /** Blocks the save unless the job could generate these settings (its own allocation rules) and knowlg-service would accept every skill; returns true to proceed. */
+  /** Live pool counts for these skills, from the same searches the job allocates from. */
+  const loadPoolCounts = async (skills: string[]): Promise<PoolCounts> => {
+    const channel = (content as Record<string, unknown> | null)?.channel as string | undefined;
+    const [buckets, skillCounts] = await Promise.all([
+      service.searchAssessmentItemBucketCounts(skills, channel ?? ed.context.channel, skillCategoryCode ?? 'skill'),
+      service.searchSkillPoolCounts(skills, skillCategoryCode ?? 'skill'),
+    ]);
+    return { buckets, skillCounts };
+  };
+
   const checkPoolSufficiency = async (candidate: Record<string, unknown>): Promise<boolean> => {
     const target = toDifficultyTarget(candidate.difficultyTarget);
     const skillValues = Array.isArray(candidate.dynamicSkills) ? candidate.dynamicSkills.map(String) : [];
-    const m = multiplier;
-    let buckets: Record<string, Record<'E' | 'M' | 'D', number>>;
-    let skillCounts: Record<string, number>;
+    let counts: PoolCounts;
     try {
-      const channel = (content as Record<string, unknown> | null)?.channel as string | undefined;
-      [buckets, skillCounts] = await Promise.all([
-        service.searchAssessmentItemBucketCounts(skillValues, channel ?? ed.context.channel, skillCategoryCode ?? 'skill'),
-        service.searchSkillPoolCounts(skillValues, skillCategoryCode ?? 'skill'),
-      ]);
+      counts = await loadPoolCounts(skillValues);
     } catch {
       showToast(t(lang, 'ERROR_POOL_CHECK_FAILED'), 'error');
       return false;
     }
-    const plan = planPool(skillValues, target, (s, l) => buckets[s]?.[l] ?? 0, minCriteria, m);
-    if (plan.infeasible) {
-      showToast(tf(lang, 'ERROR_TOO_MANY_SKILLS', { count: skillValues.length, needed: skillValues.length * minCriteria, min: minCriteria }), 'error');
-      return false;
-    }
-    if (plan.uncovered.length) {
-      const levelKey = { E: 'DIFFICULTY_EASY', M: 'DIFFICULTY_MEDIUM', D: 'DIFFICULTY_DIFFICULT' } as const;
-      const lines = plan.uncovered.map(({ level, covered, target: requested }) =>
-        tf(lang, 'ERROR_POOL_SHORTFALL', { level: t(lang, levelKey[level]), requested, needed: requested * m, available: covered * m }));
-      showToast(`${t(lang, 'ERROR_POOL_INSUFFICIENT')}: ${lines.join('; ')}`, 'error');
-      return false;
-    }
-    // A skill that can't get its own minimum would be left out of the pool, and the settings would then never match the questions.
-    if (plan.shortSkills.length) {
-      showToast(tf(lang, 'ERROR_SKILL_LEVELS_SHORT', { skills: plan.shortSkills.join(', ') }), 'error');
-      return false;
-    }
-    // Same per-skill floor knowlg-service enforces at Generate, so it fails here, translated, instead of after a successful save.
-    const perSkill = minCriteria * m;
-    const shortSkills = skillValues.filter((s) => (skillCounts[s] ?? 0) < perSkill);
-    if (shortSkills.length) {
-      showToast(tf(lang, 'ERROR_SKILL_POOL_TOO_SMALL', { needed: perSkill, skills: shortSkills.join(', ') }), 'error');
+    const problem = poolProblem(lang, skillValues, target, counts, minCriteria, multiplier);
+    if (problem) {
+      showToast(problem, 'error');
       return false;
     }
     return true;
@@ -495,7 +523,7 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
 
     if (isDifficultyTargetField(f)) {
       const target = diffTargets[code] ?? { E: 0, M: 0, D: 0 };
-      const skillCount = skillPickerCode ? (multiVals[skillPickerCode] ?? []).length : 0;
+      const selectedSkills = skillPickerCode ? (multiVals[skillPickerCode] ?? []) : [];
       return (
         <React.Fragment key={code}>
           <DifficultyTargetInput
@@ -506,8 +534,10 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
             value={target}
             onChange={(v) => setDiffTargets((s) => ({ ...s, [code]: v }))}
           />
-          {ed.isDynamicAssess && skillCount > 0 && (
-            <MinimumPerSkillPanel lang={lang} minCriteria={minCriteria} skillCount={skillCount} target={target} />
+          {ed.isDynamicAssess && selectedSkills.length > 0 && (
+            <MinimumPerSkillPanel
+              lang={lang} minCriteria={minCriteria} skillCount={selectedSkills.length} target={target}
+            />
           )}
         </React.Fragment>
       );
