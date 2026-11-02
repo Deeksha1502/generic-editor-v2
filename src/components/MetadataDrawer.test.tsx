@@ -522,6 +522,124 @@ describe('<MetadataDrawer />', () => {
       expect(skill).toBeDisabled();
     });
 
+    it('keeps the Save label in step with skill changes, and with other edits, after memoizing it (positive/negative)', async () => {
+      const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service: nonUsfService(), content });
+      render(<MetadataDrawer ed={ed} />);
+      expect(await screen.findByRole('button', { name: 'Save changes' })).toBeInTheDocument();
+      fireEvent.click(await screen.findByRole('button', { name: /Select Topic/ }));
+      fireEvent.click(await screen.findByText('Algebra'));
+      expect(await screen.findByRole('button', { name: 'Save & Generate' })).toBeInTheDocument();
+      fireEvent.change(screen.getByDisplayValue('Sample content'), { target: { value: 'Renamed' } });
+      expect(screen.getByRole('button', { name: 'Save & Generate' })).toBeInTheDocument();
+    });
+
+    it('keeps Skill disabled after the author picks the framework placeholder (positive)', async () => {
+      const service = nonUsfService({ searchFrameworks: vi.fn().mockResolvedValue([{ identifier: 'BMGS', name: 'BMGS' }]) });
+      const ed = makeEd({ drawer: 'metadata', service, isDynamicAssess: true, framework: 'BMGS', content: { ...content, framework: 'BMGS' } });
+      render(<MetadataDrawer ed={ed} />);
+      const picker = await screen.findByLabelText('Framework') as HTMLSelectElement;
+      await screen.findByRole('button', { name: /Select Topic/ });
+      fireEvent.change(picker, { target: { value: '' } });
+      await new Promise((r) => setTimeout(r, 20)); // let any fallback framework read resolve
+      expect(screen.getByRole('button', { name: /Select a framework first/ })).toBeDisabled();
+    });
+
+    it('applies only the latest framework\'s categories when an earlier read resolves last (positive)', async () => {
+      let resolveBmgs: (v: unknown) => void = () => {};
+      const readFramework = vi.fn((fw: string) => (fw === 'BMGS'
+        ? new Promise((r) => { resolveBmgs = r; })
+        : Promise.resolve([{ code: 'skill', name: 'Skill', index: 3, terms: [{ code: 'ph', name: 'Physics' }] }])));
+      const service = nonUsfService({
+        readFramework,
+        searchFrameworks: vi.fn().mockResolvedValue([{ identifier: 'BMGS', name: 'BMGS' }, { identifier: 'USF', name: 'Universal Skills' }]),
+      });
+      const ed = makeEd({ drawer: 'metadata', service, isDynamicAssess: true, content: { ...content, framework: 'BMGS' } });
+      render(<MetadataDrawer ed={ed} />);
+      const picker = await screen.findByLabelText('Framework') as HTMLSelectElement;
+      await waitFor(() => expect(readFramework).toHaveBeenCalledWith('BMGS'));
+      fireEvent.change(picker, { target: { value: 'USF' } });
+      await screen.findByRole('button', { name: /Select Skill/ });
+      resolveBmgs([{ code: 'topic', name: 'Topic', index: 2, terms: [{ code: 't1', name: 'Algebra' }] }]);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(screen.getByRole('button', { name: /Select Skill/ })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Select Topic/ })).toBeNull();
+    });
+
+    it('drops a generating save when the drawer closes during the pool check (positive)', async () => {
+      const saveMetadata = vi.fn();
+      let resolvePool: (v: unknown) => void = () => {};
+      const service = nonUsfService({ searchAssessmentItemBucketCounts: vi.fn(() => new Promise((r) => { resolvePool = r; })) });
+      const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service, saveMetadata, content });
+      const { rerender } = render(<MetadataDrawer ed={ed} />);
+      fireEvent.click(await screen.findByRole('button', { name: /Select Topic/ }));
+      fireEvent.click(await screen.findByText('Algebra'));
+      fireEvent.click(screen.getByRole('button', { name: /Save (changes|& Generate)/ }));
+      await waitFor(() => expect(service.searchAssessmentItemBucketCounts).toHaveBeenCalled());
+      rerender(<MetadataDrawer ed={{ ...ed, drawer: null }} />);
+      resolvePool({ Algebra: { E: 9, M: 9, D: 9 } });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(saveMetadata).not.toHaveBeenCalled();
+    });
+
+    it('sends an empty array when the author removes the last skill (positive)', async () => {
+      const saveMetadata = vi.fn();
+      const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service: nonUsfService(), saveMetadata, content: { ...content, dynamicSkills: ['Algebra'] } });
+      render(<MetadataDrawer ed={ed} />);
+      fireEvent.click(await screen.findByRole('button', { name: /Algebra|Select Topic/ }));
+      fireEvent.click((await screen.findAllByText('Algebra')).at(-1) as HTMLElement);
+      fireEvent.click(screen.getByRole('button', { name: /Save (changes|& Generate)/ }));
+      await waitFor(() => expect(saveMetadata).toHaveBeenCalled());
+      expect(saveMetadata.mock.calls[0][0]).toHaveProperty('topic', []);
+    });
+
+    describe('with a single-select parent category', () => {
+      const parentService = (over: Record<string, unknown> = {}) => nonUsfService({
+        readFormFields: vi.fn().mockResolvedValue([
+          { code: 'name', inputType: 'text', label: 'Title', required: true, visible: true, editable: true },
+          { code: 'board', inputType: 'select', label: 'Board', visible: true, editable: true },
+          { code: 'skill', inputType: 'multiSelect', label: 'Skill', required: true, visible: true, editable: true },
+          { code: 'difficultyTarget', label: 'Difficulty Target', required: true, visible: true, editable: true },
+        ]),
+        readFramework: vi.fn().mockResolvedValue([
+          { code: 'board', name: 'Board', index: 1, terms: [
+            { code: 's1', name: 'Maths', associations: [{ category: 'topic', name: 'Algebra' }] },
+            { code: 's2', name: 'Science', associations: [{ category: 'topic', name: 'Optics' }] },
+          ] },
+          { code: 'topic', name: 'Topic', index: 2, terms: [{ code: 't1', name: 'Algebra' }, { code: 't2', name: 'Optics' }] },
+        ]),
+        searchFrameworks: vi.fn().mockResolvedValue([{ identifier: 'BMGS', name: 'BMGS' }, { identifier: 'USF', name: 'Universal Skills' }]),
+        ...over,
+      });
+      const parentSelect = async () => (await screen.findByRole('option', { name: 'Maths' })).closest('select') as HTMLSelectElement;
+
+      it('lets a parent picked after a framework switch still narrow the skills (positive)', async () => {
+        const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service: parentService(), content: { ...content, framework: 'BMGS' } });
+        render(<MetadataDrawer ed={ed} />);
+        const picker = await screen.findByLabelText('Framework') as HTMLSelectElement;
+        await waitFor(() => expect(picker.value).toBe('BMGS'));
+        fireEvent.change(picker, { target: { value: 'USF' } });
+        fireEvent.change(await parentSelect(), { target: { value: 'Maths' } });
+        fireEvent.click(await screen.findByRole('button', { name: /Select Topic/ }));
+        expect(await screen.findByText('Algebra')).toBeInTheDocument();
+        expect(screen.queryByText('Optics')).toBeNull();
+      });
+
+      it('clears picked skills when their parent category changes (positive)', async () => {
+        const saveMetadata = vi.fn();
+        const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service: parentService(), saveMetadata, content: { ...content, framework: 'BMGS' } });
+        render(<MetadataDrawer ed={ed} />);
+        fireEvent.change(await parentSelect(), { target: { value: 'Maths' } });
+        fireEvent.click(await screen.findByRole('button', { name: /Select Topic/ }));
+        fireEvent.click(await screen.findByText('Algebra'));
+        fireEvent.mouseDown(document.body);
+        fireEvent.change(await parentSelect(), { target: { value: 'Science' } });
+        expect(await screen.findByRole('button', { name: /Select Topic/ })).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: /Save (changes|& Generate)/ }));
+        await waitFor(() => expect(saveMetadata).toHaveBeenCalled());
+        expect(saveMetadata.mock.calls[0][0]).toHaveProperty('topic', []);
+      });
+    });
+
     it('does not fall back to a free-text box when no category is literally named skill (negative)', async () => {
       const ed = makeEd({ isDynamicAssess: true, drawer: 'metadata', service: nonUsfService(), content });
       render(<MetadataDrawer ed={ed} />);

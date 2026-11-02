@@ -222,6 +222,7 @@ export const TRANSLATIONS_AR: Record<string, string> = {
   DYNAMIC_ASSESS_SELECT_FRAMEWORK_FIRST: 'اختر إطارًا أولاً',
   DYNAMIC_ASSESS_EMPTY_SUB_READONLY: 'لم يتم إنشاء أي أسئلة لهذا المحتوى بعد.',
   ERROR_DYNAMIC_ASSESS_INPUTS: 'حدّد المهارة وهدف الصعوبة قبل إنشاء الأسئلة.',
+  ERROR_DYNAMIC_ASSESS_NO_USER: 'لا يوجد مستخدم في جلستك، لذا لا يمكن إنشاء الأسئلة. سجّل الدخول مرة أخرى وأعد المحاولة.',
   ERROR_POOL_INSUFFICIENT: 'لا توجد أسئلة كافية للمهارات المحددة',
   ERROR_POOL_CHECK_FAILED: 'تعذّر التحقق من توفر الأسئلة. يرجى المحاولة مرة أخرى.',
   ERROR_POOL_SHORTFALL: '{level}: المطلوب {requested} يحتاج {needed}، المتاح {available}',

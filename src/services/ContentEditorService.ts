@@ -460,7 +460,7 @@ export class ContentEditorService {
     const results = await Promise.all(pairs.map(({ skill, qlevel }) => {
       const filters: Record<string, unknown> = { status: ['Live'], objectType: 'AssessmentItem', [categoryField]: [skill], qlevel };
       if (channel) filters.channel = channel;
-      return this.request<{ count?: number }>('POST', this.ep.compositeSearch, { request: { filters, fields: ['identifier'], limit: 1 } });
+      return this.searchCount(filters);
     }));
     const out: Record<string, Record<'E' | 'M' | 'D', number>> = {};
     pairs.forEach(({ skill, key }, i) => {
@@ -470,13 +470,15 @@ export class ContentEditorService {
     return out;
   }
 
+  /** One pool count search, retried once so a single transient failure doesn't refuse the whole save; search-service allows no qlevel facet to merge these. */
+  private searchCount(filters: Record<string, unknown>): Promise<{ count?: number }> {
+    const run = () => this.request<{ count?: number }>('POST', this.ep.compositeSearch, { request: { filters, fields: ['identifier'], limit: 1 } });
+    return run().catch(() => run());
+  }
+
   /** Live AssessmentItems per skill, with the same filters knowlg-service uses to reject a refresh (no channel, any level). */
   async searchSkillPoolCounts(skills: string[], categoryField = 'skill'): Promise<Record<string, number>> {
-    const results = await Promise.all(skills.map((skill) => this.request<{ count?: number }>(
-      'POST',
-      this.ep.compositeSearch,
-      { request: { filters: { status: ['Live'], objectType: 'AssessmentItem', [categoryField]: [skill] }, fields: ['identifier'], limit: 1 } },
-    )));
+    const results = await Promise.all(skills.map((skill) => this.searchCount({ status: ['Live'], objectType: 'AssessmentItem', [categoryField]: [skill] })));
     return Object.fromEntries(skills.map((skill, i) => [skill, Number(results[i]?.count ?? 0) || 0]));
   }
 

@@ -396,6 +396,130 @@ describe('useEditor — Dynamic Assess refreshBody timeout', () => {
   });
 });
 
+describe('useEditor — Dynamic Assess completion and writes during generation', () => {
+  const quiz = (levels: Record<string, string>) => JSON.stringify({
+    theme: { stage: [{ 'org.ekstep.questionset': { config: { __cdata: JSON.stringify({ dynamic_assess: { skills: ['Physics'], target: { E: 1, M: 0, D: 0 }, levels } }) } } }] },
+  });
+  const oldBody = quiz({ q1: 'EASY', q2: 'EASY' });
+  const daContent = (over: Partial<ContentData> = {}): ContentData => videoContent({
+    identifier: 'do_da_c', mimeType: 'application/vnd.ekstep.ecml-archive',
+    primaryCategory: 'Dynamic Course Assessment', status: 'Draft', totalQuestions: 1, lastUpdatedOn: 't0',
+    skill: ['Physics'], difficultyTarget: '{"E":1,"M":0,"D":0}', body: oldBody, ...over,
+  } as Partial<ContentData>);
+
+  it('reports done on the first poll when the job wrote before the baseline read (positive)', async () => {
+    const service = svc({ refreshContentBody: vi.fn().mockResolvedValue({}) });
+    const result = await mountWithContent(service, daContent());
+    vi.useFakeTimers();
+    try {
+      // Baseline and every poll already see the job's write: new body, new timestamp.
+      (service.readContent as ReturnType<typeof vi.fn>).mockResolvedValue(daContent({ lastUpdatedOn: 't1', body: quiz({ q3: 'EASY', q4: 'EASY' }) }));
+      await act(async () => { await result.current.refreshBody(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(result.current.dynamicAssessRefreshing).toBe(false);
+      expect(result.current.toast?.msg).toBe('Questions generated');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps waiting while the Live edit copy only carries the old body (negative)', async () => {
+    const service = svc({ refreshContentBody: vi.fn().mockResolvedValue({}) });
+    const result = await mountWithContent(service, daContent());
+    vi.useFakeTimers();
+    try {
+      // The API's edit copy bumps lastUpdatedOn before the baseline read but keeps the old quiz.
+      (service.readContent as ReturnType<typeof vi.fn>).mockResolvedValue(daContent({ lastUpdatedOn: 't1' }));
+      await act(async () => { await result.current.refreshBody(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000 * 3); });
+      expect(result.current.dynamicAssessRefreshing).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores header Save and Send for Review while generating, and allows them after (positive/negative)', async () => {
+    const service = svc({ refreshContentBody: vi.fn().mockResolvedValue({}) });
+    const result = await mountWithContent(service, daContent());
+    vi.useFakeTimers();
+    try {
+      await act(async () => { await result.current.refreshBody(); });
+      expect(result.current.dynamicAssessRefreshing).toBe(true);
+      await act(async () => { await result.current.saveDraft(); await result.current.sendForReview(); });
+      expect(service.updateContent).not.toHaveBeenCalled();
+      expect(service.sendForReview).not.toHaveBeenCalled();
+
+      (service.readContent as ReturnType<typeof vi.fn>).mockResolvedValue(daContent({ lastUpdatedOn: 't2', body: quiz({ q5: 'EASY', q6: 'EASY' }) }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(result.current.dynamicAssessRefreshing).toBe(false);
+      await act(async () => { await result.current.saveDraft(); });
+      expect(service.updateContent).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('blocks Generate with a translated message when the session has no user id (positive)', async () => {
+    const refreshContentBody = vi.fn();
+    const service = svc({ refreshContentBody });
+    (service.readContent as ReturnType<typeof vi.fn>).mockResolvedValue(daContent());
+    const { result } = renderHook(() => useEditor({ context: { ...mockContext, user: { ...mockContext.user, id: '' } }, contentId: 'do_da_c', service }));
+    await waitFor(() => expect(result.current.content?.identifier).toBe('do_da_c'));
+    await act(async () => { await result.current.refreshBody(); });
+    expect(refreshContentBody).not.toHaveBeenCalled();
+    expect(result.current.toast?.msg).toMatch(/no user/);
+    expect(result.current.dynamicAssessRefreshing).toBe(false);
+  });
+
+  it('never stacks a poll on a read still in flight (positive)', async () => {
+    const service = svc({ refreshContentBody: vi.fn().mockResolvedValue({}) });
+    const result = await mountWithContent(service, daContent());
+    vi.useFakeTimers();
+    try {
+      const readContent = service.readContent as ReturnType<typeof vi.fn>;
+      readContent.mockResolvedValueOnce(daContent()); // baseline
+      await act(async () => { await result.current.refreshBody(); });
+      readContent.mockClear();
+      readContent.mockReturnValue(new Promise(() => {})); // the first poll's read never returns
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000 * 4); });
+      expect(readContent).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('times out in a hidden tab instead of keeping the overlay up forever (positive)', async () => {
+    const service = svc({ refreshContentBody: vi.fn().mockResolvedValue({}) });
+    const result = await mountWithContent(service, daContent());
+    const originalHidden = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+    vi.useFakeTimers();
+    try {
+      await act(async () => { await result.current.refreshBody(); });
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000 * 21); });
+      expect(result.current.dynamicAssessRefreshing).toBe(false);
+      expect(result.current.toast?.msg).toMatch(/haven't appeared yet/);
+    } finally {
+      vi.useRealTimers();
+      if (originalHidden) Object.defineProperty(document, 'hidden', originalHidden);
+    }
+  });
+
+  it('regenerates when a save only switches the framework (positive)', async () => {
+    const refreshContentBody = vi.fn().mockResolvedValue({});
+    const result = await mountWithContent(svc({ refreshContentBody }), daContent({ framework: 'BMGS' }));
+    await act(async () => { await result.current.saveMetadata({ framework: 'USF', skill: ['Physics'] }, { skillField: 'skill' }); });
+    await waitFor(() => expect(refreshContentBody).toHaveBeenCalled());
+  });
+
+  it('is a plain save when the framework stays the same (negative)', async () => {
+    const refreshContentBody = vi.fn();
+    const result = await mountWithContent(svc({ refreshContentBody }), daContent({ framework: 'BMGS' }));
+    await act(async () => { await result.current.saveMetadata({ framework: 'BMGS', skill: ['Physics'] }, { skillField: 'skill' }); });
+    expect(refreshContentBody).not.toHaveBeenCalled();
+  });
+});
+
 describe('useEditor — Save also generates when needed', () => {
   const generatedBody = JSON.stringify({
     theme: { stage: [{ 'org.ekstep.questionset': { config: { __cdata: JSON.stringify({ dynamic_assess: { skills: ['Physics'], target: { E: 1, M: 0, D: 0 } } }) } } }] },

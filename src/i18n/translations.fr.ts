@@ -222,6 +222,7 @@ export const TRANSLATIONS_FR: Record<string, string> = {
   DYNAMIC_ASSESS_SELECT_FRAMEWORK_FIRST: 'Sélectionnez d’abord un cadre',
   DYNAMIC_ASSESS_EMPTY_SUB_READONLY: 'Aucune question n’a encore été générée pour ce contenu.',
   ERROR_DYNAMIC_ASSESS_INPUTS: 'Définissez la compétence et l’objectif de difficulté avant de générer les questions.',
+  ERROR_DYNAMIC_ASSESS_NO_USER: 'Votre session n’a pas d’utilisateur, les questions ne peuvent donc pas être générées. Reconnectez-vous et réessayez.',
   ERROR_POOL_INSUFFICIENT: 'Pas assez de questions disponibles pour la ou les compétences sélectionnées',
   ERROR_POOL_CHECK_FAILED: 'Impossible de vérifier la disponibilité des questions. Veuillez réessayer.',
   ERROR_POOL_SHORTFALL: '{level} : {requested} demandées, {needed} nécessaires, {available} disponibles',

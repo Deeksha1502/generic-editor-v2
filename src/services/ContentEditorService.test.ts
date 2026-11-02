@@ -114,6 +114,36 @@ describe('ContentEditorService.searchAssessmentItemBucketCounts', () => {
     }
   });
 
+  it('retries a search that fails once instead of failing the whole batch (positive)', async () => {
+    const savedFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 2) return { ok: false, status: 503, json: async () => ({}) };
+      return { ok: true, json: async () => ({ responseCode: 'OK', result: { count: 3 } }) };
+    }) as unknown as typeof fetch;
+    try {
+      expect(await new ContentEditorService().searchAssessmentItemBucketCounts(['A'], 'ch1')).toEqual({ A: { E: 3, M: 3, D: 3 } });
+      expect(calls).toBe(4);
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it('still fails when a search fails twice, so the save is not checked against a guess (negative)', async () => {
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const f = JSON.parse(String(init?.body)).request.filters;
+      if (f.qlevel === 'MEDIUM') return { ok: false, status: 503, json: async () => ({}) };
+      return { ok: true, json: async () => ({ responseCode: 'OK', result: { count: 3 } }) };
+    }) as unknown as typeof fetch;
+    try {
+      await expect(new ContentEditorService().searchAssessmentItemBucketCounts(['A'], 'ch1')).rejects.toBeTruthy();
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
   it('makes no calls when no skills are given (negative)', async () => {
     const savedFetch = globalThis.fetch;
     let called = false;

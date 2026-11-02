@@ -16,8 +16,7 @@ describe('ecmlBodyForUser', () => {
   it("previews only the user's draw per level, matching the portal's seed (positive)", () => {
     const out = ecmlBodyForUser(body(true), 'do_c', 'u1') as any;
     const kept = quizOf(out)['org.ekstep.question'].map((q: any) => q.id);
-    expect(kept).toHaveLength(2);
-    expect(kept.filter((id: string) => levels[id] === 'MEDIUM')).toEqual(pickForLearner(['b1', 'b2', 'b3'], 1, 'u1:do_c:MEDIUM'));
+    expect(kept).toEqual(['a2', 'b3']); // literal ids, so a change to the draw or its count fails here
     expect(JSON.parse(quizOf(out).config.__cdata).total_items).toBe(2);
   });
 
@@ -63,6 +62,12 @@ describe('isGenerationStale', () => {
     expect(isGenerationStale(undefined, { E: 1 }, ['Physics'])).toBe(false);
     expect(isGenerationStale(JSON.stringify(body(false)), { E: 9 }, ['Physics'])).toBe(false);
   });
+
+  it('reads a JSON-string generated target, so matching settings are not stale (negative)', () => {
+    const stringTarget = generated({ skills: ['Physics'], target: '{"E":1,"M":1,"D":0}' });
+    expect(isGenerationStale(stringTarget, { E: 1, M: 1, D: 0 }, ['Physics'])).toBe(false);
+    expect(isGenerationStale(stringTarget, { E: 1, M: 2, D: 0 }, ['Physics'])).toBe(true);
+  });
 });
 
 describe('ecmlBodyForUser — fail closed and parity', () => {
@@ -77,6 +82,16 @@ describe('ecmlBodyForUser — fail closed and parity', () => {
   it('draws nothing, never the pool, for a zero or unparseable target (positive)', () => {
     expect(quizOf(ecmlBodyForUser(withTarget({ E: 0, M: 0, D: 0 }), 'do_c', 'u1'))['org.ekstep.question']).toEqual([]);
     expect(quizOf(ecmlBodyForUser(withTarget('nope'), 'do_c', 'u1'))['org.ekstep.question']).toEqual([]);
+  });
+
+  it('caps each level at its generated size ÷ multiplier, so an undersized pool is never shown whole (positive)', () => {
+    // 3 per level with target 3: uncapped this returned all 6 unshuffled; at ×2 only floor(3/2) = 1 per level is drawn.
+    expect(quizOf(ecmlBodyForUser(withTarget({ E: 3, M: 3, D: 0 }), 'do_c', 'u1', 2))['org.ekstep.question'].map((q: any) => q.id)).toEqual(['a2', 'b3']);
+    expect(quizOf(ecmlBodyForUser(withTarget({ E: 3, M: 3, D: 0 }), 'do_c', 'u1', 3))['org.ekstep.question'].map((q: any) => q.id)).toEqual(['a2', 'b3']);
+  });
+
+  it('draws the full target when the pool holds target × multiplier (negative)', () => {
+    expect(quizOf(ecmlBodyForUser(withTarget({ E: 2, M: 0, D: 0 }), 'do_c', 'u1', 1))['org.ekstep.question'].map((q: any) => q.id)).toEqual(['a1', 'a2']);
   });
 
   it('accepts a JSON-string target like the portal does (positive)', () => {
@@ -103,6 +118,18 @@ describe('selectedSkills and needsGeneration (the selection lives in the framewo
     expect(needsGeneration({ ...base, dynamicSkills: ['Algebra'] })).toBe(true);
     expect(needsGeneration({ ...base, skill: ['Algebra'] } as never)).toBe(false);
     expect(needsGeneration({ ...base, primaryCategory: 'Learning Resource', dynamicSkills: ['Algebra'] })).toBe(false);
+  });
+
+  it('regenerates when only the framework changed, since its pool can differ (positive/negative)', () => {
+    const generatedBody = JSON.stringify({
+      theme: { stage: [{ 'org.ekstep.questionset': { config: { __cdata: JSON.stringify({ dynamic_assess: { skills: ['Algebra'], target: { E: 1, M: 0, D: 0 } } }) } } }] },
+    });
+    const c = { primaryCategory: 'Dynamic Course Assessment', difficultyTarget: '{"E":1,"M":0,"D":0}', totalQuestions: 1, body: generatedBody, dynamicSkills: ['Algebra'] };
+    expect(needsGeneration({ ...c, framework: 'USF' }, 'BMGS')).toBe(true);
+    expect(needsGeneration({ ...c, framework: 'BMGS' }, 'BMGS')).toBe(false);
+    expect(needsGeneration({ ...c, framework: 'USF' })).toBe(false);
+    expect(needsGeneration({ ...c, primaryCategory: 'Learning Resource', framework: 'USF' }, 'BMGS')).toBe(false);
+    expect(needsGeneration({ ...c, framework: 'USF' }, '')).toBe(false); // content saved without a framework, editor default filled in
   });
 });
 

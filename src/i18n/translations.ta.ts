@@ -222,6 +222,7 @@ export const TRANSLATIONS_TA: Record<string, string> = {
   DYNAMIC_ASSESS_SELECT_FRAMEWORK_FIRST: 'முதலில் ஒரு கட்டமைப்பைத் தேர்ந்தெடுக்கவும்',
   DYNAMIC_ASSESS_EMPTY_SUB_READONLY: 'இந்த உள்ளடக்கத்திற்கு இதுவரை கேள்விகள் எதுவும் உருவாக்கப்படவில்லை.',
   ERROR_DYNAMIC_ASSESS_INPUTS: 'கேள்விகளை உருவாக்கும் முன் திறன் மற்றும் கடினத்தன்மை இலக்கை அமைக்கவும்.',
+  ERROR_DYNAMIC_ASSESS_NO_USER: 'உங்கள் அமர்வில் பயனர் இல்லை, எனவே கேள்விகளை உருவாக்க முடியாது. மீண்டும் உள்நுழைந்து முயற்சிக்கவும்.',
   ERROR_POOL_INSUFFICIENT: 'தேர்ந்தெடுத்த திறன்களுக்குப் போதுமான கேள்விகள் இல்லை',
   ERROR_POOL_CHECK_FAILED: 'கேள்விகள் கிடைப்பதைச் சரிபார்க்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.',
   ERROR_POOL_SHORTFALL: '{level}: கோரியது {requested}, தேவை {needed}, கிடைப்பது {available}',

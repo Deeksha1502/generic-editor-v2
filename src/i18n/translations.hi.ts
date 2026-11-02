@@ -222,6 +222,7 @@ export const TRANSLATIONS_HI: Record<string, string> = {
   DYNAMIC_ASSESS_SELECT_FRAMEWORK_FIRST: 'पहले फ्रेमवर्क चुनें',
   DYNAMIC_ASSESS_EMPTY_SUB_READONLY: 'इस सामग्री के लिए अभी तक कोई प्रश्न तैयार नहीं किया गया है।',
   ERROR_DYNAMIC_ASSESS_INPUTS: 'प्रश्न तैयार करने से पहले कौशल और कठिनाई लक्ष्य सेट करें।',
+  ERROR_DYNAMIC_ASSESS_NO_USER: 'आपके सत्र में कोई उपयोगकर्ता नहीं है, इसलिए प्रश्न तैयार नहीं किए जा सकते। फिर से साइन इन करें और पुनः प्रयास करें।',
   ERROR_POOL_INSUFFICIENT: 'चुने गए कौशल के लिए पर्याप्त प्रश्न उपलब्ध नहीं हैं',
   ERROR_POOL_CHECK_FAILED: 'प्रश्नों की उपलब्धता की जांच नहीं हो सकी। कृपया फिर से प्रयास करें।',
   ERROR_POOL_SHORTFALL: '{level}: अनुरोधित {requested}, आवश्यक {needed}, उपलब्ध {available}',

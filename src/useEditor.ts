@@ -6,7 +6,7 @@ import type {
 } from './types';
 import { ContentEditorService } from './services/ContentEditorService';
 import { difficultyTargetTotal, toDifficultyTarget } from './difficultyTarget';
-import { isGenerationStale, needsGeneration, selectedSkills } from './dynamicAssessDraw';
+import { generatedSettings, isGenerationStale, needsGeneration, selectedSkills } from './dynamicAssessDraw';
 import { deepestCategoryCode } from './taxonomy';
 import { UploadService, detectFileMime, detectUrlMime } from './services/UploadService';
 import { TelemetryService } from './telemetry/TelemetryService';
@@ -460,7 +460,7 @@ export function useEditor(opts: UseEditorOptions) {
   /** `skillField`: the Dynamic Assess skill field the drawer wrote (its framework's deepest category), so the in-memory selection follows the save. */
   const saveMetadata = useCallback(
     async (fields: Record<string, unknown>, opts: { skillField?: string } = {}) => {
-      if (!content?.identifier) return;
+      if (!content?.identifier || generatingRef.current) return;
       setBusy(true);
       setBusyAction('save-metadata');
       try {
@@ -472,7 +472,7 @@ export function useEditor(opts: UseEditorOptions) {
         telemetry.current?.interact('modify', 'metadata', 'save');
         emit(EDITOR_EVENTS.SAVED, { id: content.identifier });
         // Dynamic Assess generates as part of Save, only when Skill/Target need it; generation shows its own loader and toast.
-        if (needsGeneration(merged)) void generateRef.current(merged);
+        if (needsGeneration(merged, content.framework ?? '')) void generateRef.current(merged);
         else showToast(t(lang, 'TOAST_DETAILS_SAVED'));
       } catch (err) {
         telemetry.current?.error(String((err as Error)?.message ?? err), 'edit');
@@ -487,6 +487,7 @@ export function useEditor(opts: UseEditorOptions) {
 
   /* ---- Save draft (header Save) ---- */
   const saveDraft = useCallback(async () => {
+    if (generatingRef.current) return; // a write while the job runs could race it and look like its completion
     if (!content?.identifier) {
       showToast(t(lang, 'TOAST_SAVED'));
       return;
@@ -510,7 +511,7 @@ export function useEditor(opts: UseEditorOptions) {
   /* ---- Collaborators ---- */
   const saveCollaborators = useCallback(
     async (collaborators: string[]) => {
-      if (!content?.identifier) return;
+      if (!content?.identifier || generatingRef.current) return;
       setBusy(true);
       setBusyAction('collaborator');
       try {
@@ -575,7 +576,7 @@ export function useEditor(opts: UseEditorOptions) {
   }, [content, lang, service, validateForReview, context]);
 
   const sendForReview = useCallback(async () => {
-    if (!content?.identifier) return;
+    if (!content?.identifier || generatingRef.current) return;
     if (isStaleGeneration(content)) { showToast(t(lang, 'ERROR_DYNAMIC_ASSESS_STALE'), 'error'); return; }
     if (lacksGeneratedQuestions(content)) { showToast(t(lang, 'DYNAMIC_ASSESS_GENERATE_FIRST'), 'error'); return; }
     setBusy(true);
@@ -603,7 +604,7 @@ export function useEditor(opts: UseEditorOptions) {
   /** Saves edited metadata, re-validates against the review form, and only submits for review if valid. */
   const saveMetadataAndSubmit = useCallback(
     async (fields: Record<string, unknown>, opts: { skillField?: string } = {}) => {
-      if (!content?.identifier) return;
+      if (!content?.identifier || generatingRef.current) return;
       setBusy(true);
       setBusyAction('save-submit');
       let merged: ContentData;
@@ -662,7 +663,7 @@ export function useEditor(opts: UseEditorOptions) {
 
   /* ---- Reviewer actions ---- */
   const publish = useCallback(async () => {
-    if (!content?.identifier) return;
+    if (!content?.identifier || generatingRef.current) return;
     if (isStaleGeneration(content)) { showToast(t(lang, 'ERROR_DYNAMIC_ASSESS_STALE_REVIEW'), 'error'); return; }
     if (lacksGeneratedQuestions(content)) { showToast(t(lang, 'DYNAMIC_ASSESS_GENERATE_FIRST'), 'error'); return; }
     setBusy(true);
@@ -684,7 +685,7 @@ export function useEditor(opts: UseEditorOptions) {
 
   const requestChanges = useCallback(
     async (reasons: string[], comment?: string) => {
-      if (!content?.identifier) return;
+      if (!content?.identifier || generatingRef.current) return;
       setBusy(true);
       setBusyAction('reject');
       try {
@@ -775,17 +776,26 @@ export function useEditor(opts: UseEditorOptions) {
       showToast(t(lang, 'ERROR_DYNAMIC_ASSESS_INPUTS'), 'error');
       return;
     }
+    // The API rejects a blank lastPublishedBy, so say why here rather than surface its raw error.
+    if (!context.user?.id) {
+      showToast(t(lang, 'ERROR_DYNAMIC_ASSESS_NO_USER'), 'error');
+      return;
+    }
     const id = current.identifier;
     // Polled reads must carry the skill field too, or the refreshed content would lose the selection.
     const skillField = skillFieldRef.current;
     const readGenerated = () => service.readContent(id, 'edit', { withBody: true, extraFields: [skillField] }).then((c) => withDynamicSkills(c, skillField));
     // lastUpdatedOn changes on every job write even when the count doesn't.
     const snapshot = (c: ContentData | null) => `${String(c?.totalQuestions ?? '')}|${String(c?.lastUpdatedOn ?? '')}`;
+    const bodyKey = (b: unknown) => (typeof b === 'string' ? b : JSON.stringify(b ?? ''));
+    // A generated quiz unlike the pre-request body is the job's own write, even if it landed before the baseline read.
+    const preBody = bodyKey(current.body);
+    const landed = (c: ContentData) => snapshot(c) !== baseline || (generatedSettings(c.body) !== null && bodyKey(c.body) !== preBody);
     setDynamicAssessRefreshing(true);
     generatingRef.current = true;
     let baseline: string;
     try {
-      await service.refreshContentBody(id, context.user?.id ?? '');
+      await service.refreshContentBody(id, context.user.id);
       telemetry.current?.interact('click', 'dynamicAssessRefreshButton', 'refresh-body');
       // Baseline only after the API returns: for Live content it first writes the edit copy, which also bumps lastUpdatedOn.
       baseline = snapshot(await service.readContent(id).catch(() => current));
@@ -798,23 +808,26 @@ export function useEditor(opts: UseEditorOptions) {
     // The job writes asynchronously: poll until it lands, bounded like the transcripts poll below.
     let attempts = 0;
     let done = false;
+    // One read at a time, so a slow read doesn't stack polls against a backend that is busy running the job.
+    let inFlight = false;
     const poll = () => {
+      if (inFlight) return;
+      inFlight = true;
       readGenerated().then((updated) => {
         if (!mountedRef.current || done) return;
-        if (snapshot(updated) !== baseline) {
+        if (landed(updated)) {
           done = true;
           generatingRef.current = false;
           setContent(updated);
           setDynamicAssessRefreshing(false);
           showToast(t(lang, 'TOAST_DYNAMIC_ASSESS_REFRESH_DONE'));
         }
-      }).catch(() => {});
+      }).catch(() => {}).finally(() => { inFlight = false; });
     };
     if (refreshPollRef.current) clearInterval(refreshPollRef.current);
     const interval = setInterval(() => {
       if (done || !mountedRef.current) { clearInterval(interval); return; }
-      // A hidden tab doesn't poll, so it mustn't use up attempts either.
-      if (typeof document !== 'undefined' && document.hidden) return;
+      // Hidden ticks still count, like the transcript poll, so the cap stays a real timeout and the overlay can't stay up forever.
       attempts += 1;
       if (attempts > DYNAMIC_ASSESS_POLL_MAX_ATTEMPTS) {
         clearInterval(interval);
@@ -824,7 +837,7 @@ export function useEditor(opts: UseEditorOptions) {
           .then((updated) => {
             if (!mountedRef.current) return;
             setContent(updated);
-            showToast(t(lang, snapshot(updated) !== baseline ? 'TOAST_DYNAMIC_ASSESS_REFRESH_DONE' : 'TOAST_DYNAMIC_ASSESS_PENDING'));
+            showToast(t(lang, landed(updated) ? 'TOAST_DYNAMIC_ASSESS_REFRESH_DONE' : 'TOAST_DYNAMIC_ASSESS_PENDING'));
           })
           .catch(() => { if (mountedRef.current) showToast(t(lang, 'TOAST_DYNAMIC_ASSESS_PENDING')); })
           .finally(() => {
@@ -833,6 +846,7 @@ export function useEditor(opts: UseEditorOptions) {
           });
         return;
       }
+      if (typeof document !== 'undefined' && document.hidden) return;
       poll();
     }, DYNAMIC_ASSESS_POLL_MS);
     refreshPollRef.current = interval;

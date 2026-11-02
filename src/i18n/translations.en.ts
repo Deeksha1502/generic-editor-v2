@@ -224,6 +224,7 @@ export const TRANSLATIONS_EN: Record<string, string> = {
   DYNAMIC_ASSESS_SELECT_FRAMEWORK_FIRST: 'Select a framework first',
   DYNAMIC_ASSESS_EMPTY_SUB_READONLY: 'No questions have been generated for this content yet.',
   ERROR_DYNAMIC_ASSESS_INPUTS: 'Set Skill and Difficulty Target before generating questions.',
+  ERROR_DYNAMIC_ASSESS_NO_USER: 'Your session has no user, so questions can\'t be generated. Sign in again and retry.',
   ERROR_POOL_INSUFFICIENT: 'Not enough questions available for the selected skill(s)',
   ERROR_POOL_CHECK_FAILED: 'Could not verify question availability. Please try again.',
   ERROR_POOL_SHORTFALL: '{level}: requested {requested} needs {needed}, available {available}',

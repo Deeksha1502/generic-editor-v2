@@ -222,6 +222,7 @@ export const TRANSLATIONS_PT: Record<string, string> = {
   DYNAMIC_ASSESS_SELECT_FRAMEWORK_FIRST: 'Selecione uma estrutura primeiro',
   DYNAMIC_ASSESS_EMPTY_SUB_READONLY: 'Nenhuma questão foi gerada para este conteúdo ainda.',
   ERROR_DYNAMIC_ASSESS_INPUTS: 'Defina a Habilidade e a Meta de dificuldade antes de gerar as questões.',
+  ERROR_DYNAMIC_ASSESS_NO_USER: 'Sua sessão não tem usuário, então as questões não podem ser geradas. Entre novamente e tente de novo.',
   ERROR_POOL_INSUFFICIENT: 'Não há questões suficientes disponíveis para a(s) habilidade(s) selecionada(s)',
   ERROR_POOL_CHECK_FAILED: 'Não foi possível verificar a disponibilidade de questões. Tente novamente.',
   ERROR_POOL_SHORTFALL: '{level}: solicitadas {requested}, necessárias {needed}, disponíveis {available}',

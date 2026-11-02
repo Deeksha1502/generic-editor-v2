@@ -3,7 +3,16 @@
 import { DYNAMIC_ASSESS_MIN_CRITERIA, DYNAMIC_ASSESS_POOL_MULTIPLIER } from './constants';
 
 const LEVELS = [['E', 'EASY'], ['M', 'MEDIUM'], ['D', 'DIFFICULT']] as const;
-type AnyRecord = Record<string, any>;
+type Rec = Record<string, unknown>;
+
+/** The value as a plain object, or undefined; narrows parsed ECML before it is indexed. */
+const asRec = (v: unknown): Rec | undefined => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Rec) : undefined);
+/** ECML holds a single child as an object and several as an array; null/undefined is none. */
+const asList = (v: unknown): unknown[] => (v == null ? [] : Array.isArray(v) ? v : [v]);
+/** A quiz's parsed config.__cdata, or undefined when missing or unparseable. */
+function quizConfig(quiz: Rec | undefined): Rec | undefined {
+  try { return asRec(JSON.parse(String(asRec(quiz?.config)?.__cdata ?? ''))); } catch { return undefined; }
+}
 
 function hashSeed(seed: string): number {
   let h = 0x811c9dc5;
@@ -37,21 +46,19 @@ export function pickForLearner(ids: string[], count: number, seed: string): stri
   return pool.slice(0, Math.max(0, count));
 }
 
-function parseBody(body: unknown): AnyRecord | null {
-  if (body && typeof body === 'object') return body as AnyRecord;
+function parseBody(body: unknown): Rec | null {
+  if (body && typeof body === 'object') return body as Rec;
   if (typeof body !== 'string' || !body.trim()) return null;
-  try { return JSON.parse(body); } catch { return null; }
+  try { return asRec(JSON.parse(body)) ?? null; } catch { return null; }
 }
 
 /** The target (and, from newer job builds, skills) the job generated the current questions for; null when there is no generated quiz. */
-export function generatedSettings(body: unknown): { target: AnyRecord; skills?: string[] } | null {
-  const stages: AnyRecord[] = parseBody(body)?.theme?.stage ?? [];
+export function generatedSettings(body: unknown): { target: Rec; skills?: string[] } | null {
+  const stages = asRec(parseBody(body)?.theme)?.stage;
   for (const stage of Array.isArray(stages) ? stages : []) {
-    for (const quiz of ([] as AnyRecord[]).concat(stage?.['org.ekstep.questionset'] ?? [])) {
-      let config: AnyRecord;
-      try { config = JSON.parse(quiz?.config?.__cdata ?? ''); } catch { continue; }
-      const block = config?.dynamic_assess;
-      if (block?.target) return { target: block.target, skills: Array.isArray(block.skills) ? block.skills.map(String) : undefined };
+    for (const quiz of asList(asRec(stage)?.['org.ekstep.questionset'])) {
+      const block = asRec(quizConfig(asRec(quiz))?.dynamic_assess);
+      if (block?.target) return { target: parseTarget(block.target), skills: Array.isArray(block.skills) ? block.skills.map(String) : undefined };
     }
   }
   return null;
@@ -67,10 +74,10 @@ export function isGenerationStale(body: unknown, savedTarget: { E?: number; M?: 
   return saved.size !== new Set(generated.skills).size || generated.skills.some((s) => !saved.has(s));
 }
 
-function parseTarget(raw: unknown): AnyRecord {
+function parseTarget(raw: unknown): Rec {
   let value = raw;
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = undefined; } }
-  return value && typeof value === 'object' ? (value as AnyRecord) : {};
+  return value && typeof value === 'object' ? (value as Rec) : {};
 }
 
 /** The content's own minCriteria/multiplier (stored at create by knowlg-service), or the defaults for content created before they were, or holding unusable values; mirrors the publish job's nodeSetting. */
@@ -88,49 +95,54 @@ export function selectedSkills(c: Record<string, unknown>, skillField: string): 
   return [...new Set((Array.isArray(v) ? v : v ? [v] : []).map(String).filter(Boolean))];
 }
 
-/** Save must also generate when Skill + Difficulty Target are usable and there are no questions yet or they were built for other settings; any other save is a plain save. */
-export function needsGeneration(c: { primaryCategory?: string; dynamicSkills?: unknown; difficultyTarget?: unknown; totalQuestions?: unknown; body?: unknown } | null): boolean {
+/** Save must also generate when Skill + Difficulty Target are usable and there are no questions yet, they were built for other settings, or the framework differs from `savedFramework`; any other save is a plain save. */
+export function needsGeneration(c: { primaryCategory?: string; dynamicSkills?: unknown; difficultyTarget?: unknown; totalQuestions?: unknown; body?: unknown; framework?: unknown } | null, savedFramework?: unknown): boolean {
   if (c?.primaryCategory !== 'Dynamic Course Assessment') return false;
   const skills = Array.isArray(c.dynamicSkills) ? c.dynamicSkills.map(String) : [];
   const target = parseTarget(c.difficultyTarget);
   const savedTarget = { E: Number(target.E) || 0, M: Number(target.M) || 0, D: Number(target.D) || 0 };
   if (!skills.length || savedTarget.E + savedTarget.M + savedTarget.D <= 0) return false;
+  // Another framework can keep the same skill names in a different category field, so its questions come from another pool; content saved without one isn't a switch.
+  if (savedFramework && String(c.framework ?? '') !== String(savedFramework)) return true;
   return !(Number(c.totalQuestions ?? 0) > 0) || isGenerationStale(c.body, savedTarget, skills);
 }
 
-/** Trims each generated quiz in a parsed ECML body to this user's draw; bodies without the job's dynamic_assess block are returned unchanged. */
-export function ecmlBodyForUser(body: unknown, contentId: string, userId: string | undefined): unknown {
+/** Trims each generated quiz in a parsed ECML body to this user's draw; bodies without the job's dynamic_assess block are returned unchanged. `multiplier` is the content's own (dynamicAssessSettings). */
+export function ecmlBodyForUser(body: unknown, contentId: string, userId: string | undefined, multiplier = DYNAMIC_ASSESS_POOL_MULTIPLIER): unknown {
   if (!body || typeof body !== 'object') return body;
-  const stages: AnyRecord[] = Array.isArray((body as AnyRecord).theme?.stage) ? (body as AnyRecord).theme.stage : [];
-  if (!stages.some((s) => s?.['org.ekstep.questionset'])) return body;
-  const copy: AnyRecord = structuredClone(body);
+  const theme = asRec((body as Rec).theme);
+  const stages = Array.isArray(theme?.stage) ? theme.stage : [];
+  if (!stages.some((s) => asRec(s)?.['org.ekstep.questionset'])) return body;
+  const copy = structuredClone(body) as Rec;
+  const perLevel = Math.max(1, Math.trunc(multiplier) || 1);
   let changed = false;
-  for (const stage of copy.theme.stage as AnyRecord[]) {
-    const quizzes: AnyRecord[] = ([] as AnyRecord[]).concat(stage?.['org.ekstep.questionset'] ?? []);
-    for (const quiz of quizzes) {
-      let config: AnyRecord;
-      try { config = JSON.parse(quiz?.config?.__cdata ?? ''); } catch { continue; }
-      const block = config?.dynamic_assess;
-      const questions: AnyRecord[] = ([] as AnyRecord[]).concat(quiz['org.ekstep.question'] ?? []);
-      if (!block || questions.length === 0) continue;
+  for (const stage of (asRec(copy.theme)?.stage ?? []) as unknown[]) {
+    for (const quiz of asList(asRec(stage)?.['org.ekstep.questionset']).map(asRec)) {
+      const config = quizConfig(quiz);
+      const block = asRec(config?.dynamic_assess);
+      const questions = asList(quiz?.['org.ekstep.question']).map((q) => asRec(q) ?? {});
+      if (!quiz || !config || !block || questions.length === 0) continue;
       // Fails closed like the portal: a missing, zero or unparseable target draws nothing rather than revealing the pool.
       const target = parseTarget(block.target);
-      const levels: AnyRecord = block.levels ?? {};
+      const levels = asRec(block.levels) ?? {};
       const picked = new Set<string>();
       for (const [key, level] of LEVELS) {
         const atLevel = questions.map((q) => String(q.id)).filter((id) => String(levels[id] ?? '').toUpperCase() === level);
-        pickForLearner(atLevel, Number(target[key]) || 0, `${userId || 'anonymous'}:${contentId}:${level}`).forEach((id) => picked.add(id));
+        // Capped at what the job generated for this level, like the QuestionSet editor, so an undersized pool is never shown whole.
+        const count = Math.min(Number(target[key]) || 0, Math.floor(atLevel.length / perLevel));
+        pickForLearner(atLevel, count, `${userId || 'anonymous'}:${contentId}:${level}`).forEach((id) => picked.add(id));
       }
       const kept = questions.filter((q) => picked.has(String(q.id)));
       if (kept.length === questions.length) continue;
-      let items: AnyRecord[] = [];
-      try { items = JSON.parse(quiz?.data?.__cdata ?? '[]'); } catch { items = []; }
+      let items: Rec[] = [];
+      const data = asRec(quiz.data);
+      try { items = asList(JSON.parse(String(data?.__cdata ?? '[]'))).map((i) => asRec(i) ?? {}); } catch { items = []; }
       const keptItems = items.filter((item) => picked.has(String(item.identifier)));
       quiz['org.ekstep.question'] = kept;
-      if (quiz.data) quiz.data.__cdata = JSON.stringify(keptItems);
+      if (data) data.__cdata = JSON.stringify(keptItems);
       config.total_items = kept.length;
       config.max_score = keptItems.length ? keptItems.reduce((sum, item) => sum + (Number(item.max_score) || 1), 0) : kept.length;
-      quiz.config.__cdata = JSON.stringify(config);
+      (quiz.config as Rec).__cdata = JSON.stringify(config);
       changed = true;
     }
   }

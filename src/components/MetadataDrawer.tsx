@@ -242,7 +242,10 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
   const [fwOptions, setFwOptions] = useState<Array<{ identifier: string; name: string }>>([]);
   const contentChannel = (content as Record<string, unknown> | null)?.channel as string | undefined;
 
+  // Bumped on every open/close, so a save still awaiting its pool check after the drawer closed is dropped.
+  const sessionRef = useRef(0);
   useEffect(() => {
+    sessionRef.current += 1;
     if (open) setSelectedFw(String(content?.framework || framework || ''));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, content?.identifier]);
@@ -254,11 +257,15 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
 
   /* Framework categories for taxonomy cascade. */
   useEffect(() => {
-    const fw = selectedFw || content?.framework || framework;
+    // Dynamic Assess follows the picker alone, so choosing its placeholder leaves Skill without options.
+    const fw = ed.isDynamicAssess ? selectedFw : (content?.framework || framework);
     if (!open || !fw || loadedFw.current === fw) return;
     loadedFw.current = fw;
-    service.readFramework(fw).then(setCategories).catch(() => setCategories([]));
-  }, [open, content, framework, service, selectedFw]);
+    // Only the latest requested framework may apply, since a slower earlier read can resolve after it.
+    service.readFramework(fw)
+      .then((c) => { if (loadedFw.current === fw) setCategories(c); })
+      .catch(() => { if (loadedFw.current === fw) setCategories([]); });
+  }, [open, content, framework, service, selectedFw, ed.isDynamicAssess]);
 
   /* Form/read field definitions — save form for Edit Details, review form for
    * Submit-for-review. Keyed on subtype+action so switching mode refetches even
@@ -379,6 +386,8 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
       setMulti(code, []);
       setVal(code, '');
     }
+    // The Dynamic skill picker holds the deepest category's terms under its own code, so it resets with that category.
+    if (ed.isDynamicAssess && skillPickerCode && skillCategoryCode && orderedTaxoCodes.slice(idx + 1).includes(skillCategoryCode)) setMulti(skillPickerCode, []);
   };
 
   /** A new framework means different category terms, so clear skill and every category value picked under the old one. */
@@ -387,7 +396,8 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
     setSelectedFw(fw);
     setCategories([]);
     loadedFw.current = null; // otherwise re-picking the original framework (or the placeholder) never reloads its categories
-    setMultiVals((s) => ({ ...s, ...Object.fromEntries(codes.map((c) => [c, []])) }));
+    // Only fields already held as multiselects; an empty array for a single-select would mask its later value in selectedTaxo.
+    setMultiVals((s) => ({ ...s, ...Object.fromEntries(codes.filter((c) => c in s || c === skillPickerCode).map((c) => [c, []])) }));
     setValues((s) => ({ ...s, ...Object.fromEntries(codes.filter((c) => c in s).map((c) => [c, ''])) }));
   };
 
@@ -425,8 +435,9 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
       if (isReplacedBySkillPicker(f)) continue;
       if (ed.isDynamicAssess && isSkillField(f)) {
         // Saved in the framework's deepest category field, where the backend reads the selection; left out until that field is known.
-        const arr = multiVals[f.code] ?? [];
-        if (skillCategoryCode) out[skillCategoryCode] = arr.length ? arr : undefined;
+        const arr = multiVals[f.code];
+        // An empty array, not undefined, so removing the last skill clears it on the server too; an unseeded picker writes nothing.
+        if (skillCategoryCode && arr) out[skillCategoryCode] = arr;
         continue;
       }
       if (isMultiField(f, ed.isDynamicAssess)) {
@@ -487,13 +498,14 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
       if (miss.length) { setReviewErrors(miss); return; }
     }
     const out = buildOut();
-    const generates = needsGeneration(withSelection(out));
+    const generates = needsGeneration(withSelection(out), content?.framework ?? '');
     // Submitting can't also generate, so changed settings must be saved (and generated) first.
     if (reviewSubmitMode && generates) {
       showToast(t(lang, 'ERROR_DYNAMIC_ASSESS_SUBMIT_STALE'), 'error');
       return;
     }
     if (generates) {
+      const session = sessionRef.current;
       setChecking(true);
       try {
         // The pool is only checked when this save will generate, so other edits cost no extra searches.
@@ -501,6 +513,7 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
       } finally {
         setChecking(false);
       }
+      if (sessionRef.current !== session) return; // the drawer closed or switched content during the check
     }
     setReviewErrors([]);
     // Only a Dynamic save names the skill field it wrote; other content keeps the plain call.
@@ -649,7 +662,12 @@ const MetadataDrawer: React.FC<{ ed: EditorController }> = ({ ed }) => {
   };
 
   // Live label: tells the author when Save will also generate questions.
-  const saveGenerates = ed.isDynamicAssess && open && needsGeneration(withSelection(buildOut()));
+  // needsGeneration parses the ECML body, so it reruns only when skill, target, framework or content change, not on every keystroke in other fields.
+  const saveGenerates = useMemo(
+    () => ed.isDynamicAssess && open && needsGeneration(withSelection(buildOut()), content?.framework ?? ''),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ed.isDynamicAssess, open, content, fields, multiVals, diffTargets, selectedFw, skillCategoryCode, skillPickerCode],
+  );
 
   // Skill always renders with the other fields (under its framework picker), even when a framework names a category 'skill'.
   const taxoFields = fields.filter((f) => taxoCodes.has(f.code) && !(ed.isDynamicAssess && isSkillField(f)) && !isReplacedBySkillPicker(f));
