@@ -5,6 +5,9 @@ import type {
   EditorMode, EditorView, RawTranscript, UploadProgress,
 } from './types';
 import { ContentEditorService } from './services/ContentEditorService';
+import { difficultyTargetTotal, toDifficultyTarget } from './difficultyTarget';
+import { generatedSettings, isGenerationStale, needsGeneration, selectedSkills } from './dynamicAssessDraw';
+import { deepestCategoryCode } from './taxonomy';
 import { UploadService, detectFileMime, detectUrlMime } from './services/UploadService';
 import { TelemetryService } from './telemetry/TelemetryService';
 import type { TelemetryEvent } from './telemetry/telemetry.types';
@@ -37,6 +40,48 @@ const REVIEWER_ROLES = ['CONTENT_REVIEWER', 'BOOK_REVIEWER'];
 const TRANSCRIPT_POLL_MS = 20000;
 /** ~5 minutes of active (non-hidden) polling - generation is expected to finish well within this. */
 const TRANSCRIPT_POLL_MAX_ATTEMPTS = 15;
+
+/** refresh-body polling: faster and shorter than transcript polling since the job write is quicker. */
+const DYNAMIC_ASSESS_POLL_MS = 3000;
+const DYNAMIC_ASSESS_POLL_MAX_ATTEMPTS = 20;
+
+const DYNAMIC_ASSESS_CATEGORY = 'Dynamic Course Assessment';
+
+/** Dynamic Assess has no uploaded artifact (the job generates its body), so it counts as usable and skips the upload view. */
+function hasUsableContent(content: { artifactUrl?: string; primaryCategory?: string } | null): boolean {
+  return !!content?.artifactUrl || content?.primaryCategory === DYNAMIC_ASSESS_CATEGORY;
+}
+
+/** Dynamic Assess content whose saved skill/difficultyTarget differ from what its questions were generated for. */
+function isStaleGeneration(c: ContentData | null): boolean {
+  return c?.primaryCategory === DYNAMIC_ASSESS_CATEGORY && Number(c.totalQuestions ?? 0) > 0
+    && isGenerationStale(c.body, toDifficultyTarget(c.difficultyTarget), c.dynamicSkills);
+}
+
+/** Translates knowlg-service's per-skill pool rejection; its message is English-only ("Fewer than 6 Live questions found for skill(s): A, B"). */
+function skillPoolErrorMessage(err: unknown, lang: string): string | null {
+  const e = err as { code?: string; message?: string };
+  if (e?.code !== 'ERR_SKILL_INSUFFICIENT_POOL') return null;
+  const match = /Fewer than (\d+).*skill\(s\):\s*(.+)$/.exec(e.message ?? '');
+  if (!match) return e.message ?? null;
+  return tf(lang, 'ERROR_SKILL_POOL_TOO_SMALL', { needed: match[1] ?? '', skills: match[2] ?? '' });
+}
+
+/** Content with its in-memory Dynamic Assess selection read from the framework's skill field. */
+function withDynamicSkills(c: ContentData, skillField: string): ContentData {
+  return { ...c, dynamicSkills: selectedSkills(c, skillField) };
+}
+
+/** Content after a metadata save; a Dynamic save that wrote the skill field also moves the in-memory selection to it. */
+function applySavedFields(c: ContentData, fields: Record<string, unknown>, skillField: string | undefined, versionKey: string | undefined): ContentData {
+  const next = { ...c, ...fields, versionKey: versionKey ?? c.versionKey } as ContentData;
+  return skillField && skillField in fields ? withDynamicSkills(next, skillField) : next;
+}
+
+/** Dynamic Assess content the job hasn't generated questions for yet. */
+function lacksGeneratedQuestions(c: ContentData | null): boolean {
+  return c?.primaryCategory === DYNAMIC_ASSESS_CATEGORY && !(Number(c.totalQuestions ?? 0) > 0);
+}
 
 function resolveMode(status: string | undefined, roles: string[] = []): EditorMode {
   const s = (status || STATUS.DRAFT).toLowerCase().trim();
@@ -124,6 +169,13 @@ export function useEditor(opts: UseEditorOptions) {
   const uploadingRef = useRef(false);
   /** False once the hook unmounts — stops late async work touching a torn-down instance. */
   const mountedRef = useRef(true);
+  const refreshPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Lets saveMetadata (declared above refreshBody) start generation with the just-saved content.
+  const generateRef = useRef<(c?: ContentData) => Promise<void>>(async () => {});
+  const generatingRef = useRef(false);
+  /** Dynamic Assess: the field holding the selected skills, i.e. the framework's deepest category (e.g. "topic"), as the backend resolves it. */
+  const skillFieldRef = useRef('skill');
+  const skillFieldCache = useRef(new Map<string, string>());
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const mode: EditorMode = resolveMode(content?.status, context.user?.roles);
@@ -150,6 +202,7 @@ export function useEditor(opts: UseEditorOptions) {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (refreshPollRef.current) clearInterval(refreshPollRef.current);
       if (lockedIdRef.current) {
         service.retireLock(lockedIdRef.current).catch(() => {});
         lockedRef.current = false;
@@ -158,6 +211,21 @@ export function useEditor(opts: UseEditorOptions) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** Dynamic Assess: the framework's deepest category code, where the selected skills are stored; falls back to "skill" like the backend's resolveCategoryCode. */
+  const resolveSkillField = async (framework: unknown): Promise<string> => {
+    const fw = typeof framework === 'string' ? framework : '';
+    if (!fw) return 'skill';
+    const cached = skillFieldCache.current.get(fw);
+    if (cached) return cached;
+    try {
+      const code = deepestCategoryCode(await service.readFramework(fw)) ?? 'skill';
+      skillFieldCache.current.set(fw, code);
+      return code;
+    } catch {
+      return 'skill'; // same fallback as the backend; not cached, so a later read can still resolve it
+    }
+  };
 
   /* ---- Initial load ---- */
   useEffect(() => {
@@ -168,11 +236,22 @@ export function useEditor(opts: UseEditorOptions) {
     setBusy(true);
     service
       .readContent(initialId)
+      // Only Dynamic Assess needs its body (generated questions) and its framework's skill field, so only it pays for a second read with them.
+      .then(async (c) => {
+        if (c.primaryCategory !== DYNAMIC_ASSESS_CATEGORY) return c;
+        const field = await resolveSkillField(c.framework);
+        skillFieldRef.current = field;
+        return withDynamicSkills(await service.readContent(initialId, 'edit', { withBody: true, extraFields: [field] }), field);
+      })
       .then((c) => {
         if (!mountedRef.current) return; // editor torn down mid-load
         telemetry.current?.setObject(c.identifier);
         setContent(c);
-        setView(c.artifactUrl ? 'player' : 'upload');
+        setView(hasUsableContent(c) ? 'player' : 'upload');
+        // Dynamic Assess opens on the metadata form, since there's nothing to preview until questions are generated.
+        if (c.primaryCategory === DYNAMIC_ASSESS_CATEGORY && resolveMode(c.status, context.user?.roles) === 'edit') {
+          openDrawer('metadata');
+        }
         // Lock the content when opened for editing (creator on a draft), mirroring the old editor.
         if (resolveMode(c.status, context.user?.roles) === 'edit' && !lockedRef.current) {
           service.createLock(c.identifier, context, c)
@@ -304,7 +383,7 @@ export function useEditor(opts: UseEditorOptions) {
         telemetry.current?.error(String((err as Error)?.message ?? err));
         emit(EDITOR_EVENTS.ERROR, { phase: 'upload', message: String((err as Error)?.message) });
         showToast(t(lang, 'ERROR_UPLOAD'), 'error');
-        setView(content?.artifactUrl ? 'player' : 'upload');
+        setView(hasUsableContent(content) ? 'player' : 'upload');
       } finally {
         uploadingRef.current = false;
         setBusy(false);
@@ -355,7 +434,7 @@ export function useEditor(opts: UseEditorOptions) {
           setView('upload');
         } else {
           showToast(t(lang, 'ERROR_UPLOAD'), 'error');
-          setView(content?.artifactUrl ? 'player' : 'upload');
+          setView(hasUsableContent(content) ? 'player' : 'upload');
         }
       } finally {
         uploadingRef.current = false;
@@ -373,23 +452,28 @@ export function useEditor(opts: UseEditorOptions) {
     setBusy(false);
     setBusyAction(null);
     setProgress(null);
-    setView(content?.artifactUrl ? 'player' : 'upload');
+    setView(hasUsableContent(content) ? 'player' : 'upload');
     telemetry.current?.interact('click', 'cancelUpload', 'upload');
   }, [content]);
 
   /* ---- Save metadata ---- */
+  /** `skillField`: the Dynamic Assess skill field the drawer wrote (its framework's deepest category), so the in-memory selection follows the save. */
   const saveMetadata = useCallback(
-    async (fields: Record<string, unknown>) => {
-      if (!content?.identifier) return;
+    async (fields: Record<string, unknown>, opts: { skillField?: string } = {}) => {
+      if (!content?.identifier || generatingRef.current) return;
       setBusy(true);
       setBusyAction('save-metadata');
       try {
         const res = await service.updateContent(content.identifier, fields, content.versionKey);
-        setContent((c) => (c ? { ...c, ...fields, versionKey: res?.versionKey ?? c.versionKey } : c));
+        if (opts.skillField) skillFieldRef.current = opts.skillField;
+        const merged = applySavedFields(content, fields, opts.skillField, res?.versionKey);
+        setContent((c) => (c ? applySavedFields(c, fields, opts.skillField, res?.versionKey) : c));
         setDrawer(null);
         telemetry.current?.interact('modify', 'metadata', 'save');
         emit(EDITOR_EVENTS.SAVED, { id: content.identifier });
-        showToast(t(lang, 'TOAST_DETAILS_SAVED'));
+        // Dynamic Assess generates as part of Save, only when Skill/Target need it; generation shows its own loader and toast.
+        if (needsGeneration(merged, content.framework ?? '')) void generateRef.current(merged);
+        else showToast(t(lang, 'TOAST_DETAILS_SAVED'));
       } catch (err) {
         telemetry.current?.error(String((err as Error)?.message ?? err), 'edit');
         showToast(String((err as Error)?.message ?? t(lang, 'ERROR_GENERIC')), 'error');
@@ -403,6 +487,7 @@ export function useEditor(opts: UseEditorOptions) {
 
   /* ---- Save draft (header Save) ---- */
   const saveDraft = useCallback(async () => {
+    if (generatingRef.current) return; // a write while the job runs could race it and look like its completion
     if (!content?.identifier) {
       showToast(t(lang, 'TOAST_SAVED'));
       return;
@@ -426,7 +511,7 @@ export function useEditor(opts: UseEditorOptions) {
   /* ---- Collaborators ---- */
   const saveCollaborators = useCallback(
     async (collaborators: string[]) => {
-      if (!content?.identifier) return;
+      if (!content?.identifier || generatingRef.current) return;
       setBusy(true);
       setBusyAction('collaborator');
       try {
@@ -491,7 +576,9 @@ export function useEditor(opts: UseEditorOptions) {
   }, [content, lang, service, validateForReview, context]);
 
   const sendForReview = useCallback(async () => {
-    if (!content?.identifier) return;
+    if (!content?.identifier || generatingRef.current) return;
+    if (isStaleGeneration(content)) { showToast(t(lang, 'ERROR_DYNAMIC_ASSESS_STALE'), 'error'); return; }
+    if (lacksGeneratedQuestions(content)) { showToast(t(lang, 'DYNAMIC_ASSESS_GENERATE_FIRST'), 'error'); return; }
     setBusy(true);
     setBusyAction('save-submit');
     try {
@@ -516,20 +603,28 @@ export function useEditor(opts: UseEditorOptions) {
 
   /** Saves edited metadata, re-validates against the review form, and only submits for review if valid. */
   const saveMetadataAndSubmit = useCallback(
-    async (fields: Record<string, unknown>) => {
-      if (!content?.identifier) return;
+    async (fields: Record<string, unknown>, opts: { skillField?: string } = {}) => {
+      if (!content?.identifier || generatingRef.current) return;
       setBusy(true);
       setBusyAction('save-submit');
       let merged: ContentData;
       try {
         const res = await service.updateContent(content.identifier, fields, content.versionKey);
-        merged = { ...content, ...fields, versionKey: res?.versionKey ?? content.versionKey } as ContentData;
+        if (opts.skillField) skillFieldRef.current = opts.skillField;
+        merged = applySavedFields(content, fields, opts.skillField, res?.versionKey);
         setContent(merged);
         telemetry.current?.interact('modify', 'metadata', 'save');
         emit(EDITOR_EVENTS.SAVED, { id: content.identifier });
       } catch (err) {
         telemetry.current?.error(String((err as Error)?.message ?? err), 'edit');
         showToast(String((err as Error)?.message ?? t(lang, 'ERROR_GENERIC')), 'error');
+        setBusy(false);
+        setBusyAction(null);
+        return;
+      }
+      // Settings changed in the review drawer itself would otherwise submit questions built for the old ones.
+      if (isStaleGeneration(merged) || lacksGeneratedQuestions(merged)) {
+        showToast(t(lang, lacksGeneratedQuestions(merged) ? 'DYNAMIC_ASSESS_GENERATE_FIRST' : 'ERROR_DYNAMIC_ASSESS_STALE'), 'error');
         setBusy(false);
         setBusyAction(null);
         return;
@@ -568,7 +663,9 @@ export function useEditor(opts: UseEditorOptions) {
 
   /* ---- Reviewer actions ---- */
   const publish = useCallback(async () => {
-    if (!content?.identifier) return;
+    if (!content?.identifier || generatingRef.current) return;
+    if (isStaleGeneration(content)) { showToast(t(lang, 'ERROR_DYNAMIC_ASSESS_STALE_REVIEW'), 'error'); return; }
+    if (lacksGeneratedQuestions(content)) { showToast(t(lang, 'DYNAMIC_ASSESS_GENERATE_FIRST'), 'error'); return; }
     setBusy(true);
     setBusyAction('publish');
     try {
@@ -588,7 +685,7 @@ export function useEditor(opts: UseEditorOptions) {
 
   const requestChanges = useCallback(
     async (reasons: string[], comment?: string) => {
-      if (!content?.identifier) return;
+      if (!content?.identifier || generatingRef.current) return;
       setBusy(true);
       setBusyAction('reject');
       try {
@@ -662,6 +759,100 @@ export function useEditor(opts: UseEditorOptions) {
   /** True when content was rejected and has reviewer suggestions to show. */
   const hasReviewComments = !!(content?.rejectReasons?.length || content?.rejectComment);
 
+  /* Dynamic Assess: totalQuestions (set by the job) means questions exist; pkgVersion only moves on publish, and Drafts aren't published. */
+  const isDynamicAssess = content?.primaryCategory === DYNAMIC_ASSESS_CATEGORY;
+  const hasGeneratedBody = Number(content?.totalQuestions ?? 0) > 0;
+  const dynamicAssessStale = isDynamicAssess && hasGeneratedBody && isStaleGeneration(content);
+  const [dynamicAssessRefreshing, setDynamicAssessRefreshing] = useState(false);
+
+  const refreshBody = useCallback(async (override?: ContentData) => {
+    // Save passes the just-saved content, since this callback's `content` is from before the save.
+    const current = override ?? content;
+    if (!current?.identifier || generatingRef.current) return; // one generation at a time
+
+    // Without saved inputs the job fails silently, which would show up ~60s later as a misleading "still in progress".
+    const skills = Array.isArray(current.dynamicSkills) ? current.dynamicSkills : [];
+    if (!skills.length || difficultyTargetTotal(current.difficultyTarget) <= 0) {
+      showToast(t(lang, 'ERROR_DYNAMIC_ASSESS_INPUTS'), 'error');
+      return;
+    }
+    // The API rejects a blank lastPublishedBy, so say why here rather than surface its raw error.
+    if (!context.user?.id) {
+      showToast(t(lang, 'ERROR_DYNAMIC_ASSESS_NO_USER'), 'error');
+      return;
+    }
+    const id = current.identifier;
+    // Polled reads must carry the skill field too, or the refreshed content would lose the selection.
+    const skillField = skillFieldRef.current;
+    const readGenerated = () => service.readContent(id, 'edit', { withBody: true, extraFields: [skillField] }).then((c) => withDynamicSkills(c, skillField));
+    // lastUpdatedOn changes on every job write even when the count doesn't.
+    const snapshot = (c: ContentData | null) => `${String(c?.totalQuestions ?? '')}|${String(c?.lastUpdatedOn ?? '')}`;
+    const bodyKey = (b: unknown) => (typeof b === 'string' ? b : JSON.stringify(b ?? ''));
+    // A generated quiz unlike the pre-request body is the job's own write, even if it landed before the baseline read.
+    const preBody = bodyKey(current.body);
+    const landed = (c: ContentData) => snapshot(c) !== baseline || (generatedSettings(c.body) !== null && bodyKey(c.body) !== preBody);
+    setDynamicAssessRefreshing(true);
+    generatingRef.current = true;
+    let baseline: string;
+    try {
+      await service.refreshContentBody(id, context.user.id);
+      telemetry.current?.interact('click', 'dynamicAssessRefreshButton', 'refresh-body');
+      // Baseline only after the API returns: for Live content it first writes the edit copy, which also bumps lastUpdatedOn.
+      baseline = snapshot(await service.readContent(id).catch(() => current));
+    } catch (err) {
+      showToast(skillPoolErrorMessage(err, lang) ?? String((err as Error)?.message ?? t(lang, 'ERROR_GENERIC')), 'error');
+      setDynamicAssessRefreshing(false);
+      generatingRef.current = false;
+      return;
+    }
+    // The job writes asynchronously: poll until it lands, bounded like the transcripts poll below.
+    let attempts = 0;
+    let done = false;
+    // One read at a time, so a slow read doesn't stack polls against a backend that is busy running the job.
+    let inFlight = false;
+    const poll = () => {
+      if (inFlight) return;
+      inFlight = true;
+      readGenerated().then((updated) => {
+        if (!mountedRef.current || done) return;
+        if (landed(updated)) {
+          done = true;
+          generatingRef.current = false;
+          setContent(updated);
+          setDynamicAssessRefreshing(false);
+          showToast(t(lang, 'TOAST_DYNAMIC_ASSESS_REFRESH_DONE'));
+        }
+      }).catch(() => {}).finally(() => { inFlight = false; });
+    };
+    if (refreshPollRef.current) clearInterval(refreshPollRef.current);
+    const interval = setInterval(() => {
+      if (done || !mountedRef.current) { clearInterval(interval); return; }
+      // Hidden ticks still count, like the transcript poll, so the cap stays a real timeout and the overlay can't stay up forever.
+      attempts += 1;
+      if (attempts > DYNAMIC_ASSESS_POLL_MAX_ATTEMPTS) {
+        clearInterval(interval);
+        done = true; // a late in-flight response must not report "done" after "still pending"
+        // One last read so the editor shows what the server has, even when the job wrote before the baseline read.
+        readGenerated()
+          .then((updated) => {
+            if (!mountedRef.current) return;
+            setContent(updated);
+            showToast(t(lang, landed(updated) ? 'TOAST_DYNAMIC_ASSESS_REFRESH_DONE' : 'TOAST_DYNAMIC_ASSESS_PENDING'));
+          })
+          .catch(() => { if (mountedRef.current) showToast(t(lang, 'TOAST_DYNAMIC_ASSESS_PENDING')); })
+          .finally(() => {
+            generatingRef.current = false;
+            if (mountedRef.current) setDynamicAssessRefreshing(false);
+          });
+        return;
+      }
+      if (typeof document !== 'undefined' && document.hidden) return;
+      poll();
+    }, DYNAMIC_ASSESS_POLL_MS);
+    refreshPollRef.current = interval;
+  }, [content, service, lang, showToast, context.user?.id]);
+  generateRef.current = refreshBody;
+
   /* ---- Transcripts: single fetch owner for the raw list (EditorPreview/TranscriptsDrawer
      read it from here instead of each independently re-fetching the same slow ?enrich=all
      payload). Gates the header's "View transcript" button and feeds the preview's live
@@ -708,12 +899,13 @@ export function useEditor(opts: UseEditorOptions) {
     userId: context.user?.id, rootOrgId: context.user?.rootOrgId, userRoles: context.user?.roles ?? [],
     reviewErrors, uploadSuccess, sessionExpired, assetPicker, reviewSubmitMode, hasReviewComments,
     hasTranscripts, transcripts, transcriptsChecked,
+    isDynamicAssess, hasGeneratedBody, dynamicAssessRefreshing, dynamicAssessStale,
     // setters
     setDrawer: openDrawer, setContentType, setUploadUrl, setUrlError, showToast, setReviewErrors, setReviewSubmitMode,
     dismissSessionExpiry, openAssetPicker, closeAssetPicker,
     // actions
     uploadFile, uploadFromUrl, cancelUpload, saveMetadata, saveMetadataAndSubmit, saveDraft, saveCollaborators,
-    validateForReview, validateForReviewAsync, sendForReview, publish, requestChanges, close,
+    validateForReview, validateForReviewAsync, sendForReview, publish, requestChanges, close, refreshBody,
     uploadAsset: opts.onUploadAsset,
     // services (for drawers that need search / framework)
     service, context,

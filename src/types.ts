@@ -82,6 +82,13 @@ export interface ContentData {
   pkgVersion?: number;
   rejectReasons?: string[];
   rejectComment?: string;
+  /** Dynamic Assess only, in memory: the selected skills, read from the framework's deepest category field (e.g. "topic"); never sent back as-is. */
+  dynamicSkills?: string[];
+  /** Dynamic Assess custom field (Dynamic Course Assessment category only); the API stores and returns it as a JSON string. */
+  difficultyTarget?: string | { E?: number; M?: number; D?: number };
+  /** Dynamic Assess only, set by knowlg-service at create; read through dynamicAssessSettings, which falls back for older content. */
+  minCriteria?: number;
+  multiplier?: number;
   /** Any extra fields returned by content read. */
   [key: string]: unknown;
 }

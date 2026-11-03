@@ -1,6 +1,6 @@
-import { render, screen } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
-import EditorPreview from './EditorPreview';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import EditorPreview, { rendererData } from './EditorPreview';
 import { makeEd, mockContext, mockContent } from '../test/mockEd';
 
 describe('<EditorPreview />', () => {
@@ -92,5 +92,69 @@ describe('<EditorPreview />', () => {
     rerender(<EditorPreview ed={ed2} context={mockContext} />);
     const secondIframe = container.querySelector('iframe');
     expect(secondIframe).not.toBe(firstIframe);
+  });
+
+  it('hands the ECML body to the renderer as data, so a generated Dynamic Assess lesson can play (positive)', () => {
+    const body = '{"theme":{"id":"theme","stage":[]}}';
+    const ed = makeEd({ isDynamicAssess: true, content: { ...mockContent, mimeType: 'application/vnd.ekstep.ecml-archive', artifactUrl: undefined, body } });
+    const { container } = render(<EditorPreview ed={ed} context={mockContext} />);
+    const iframe = container.querySelector('iframe')!;
+    const initializePreview = vi.fn();
+    (iframe.contentWindow as unknown as { initializePreview: typeof initializePreview }).initializePreview = initializePreview;
+    fireEvent.load(iframe);
+    expect(initializePreview).toHaveBeenCalledWith(expect.objectContaining({ data: { theme: { id: 'theme', stage: [] } } }));
+  });
+
+  it('gives the renderer only the draw in metadata.body too, never the full pool (positive)', () => {
+    const ids = ['a1', 'a2', 'a3'];
+    const body = JSON.stringify({ theme: { stage: [{ 'org.ekstep.questionset': [{
+      config: { __cdata: JSON.stringify({ dynamic_assess: { target: { E: 1, M: 0, D: 0 }, levels: Object.fromEntries(ids.map((id) => [id, 'EASY'])) } }) },
+      data: { __cdata: JSON.stringify(ids.map((id) => ({ identifier: id }))) },
+      'org.ekstep.question': ids.map((id) => ({ id })),
+    }] }] } });
+    const ed = makeEd({ isDynamicAssess: true, content: { ...mockContent, mimeType: 'application/vnd.ekstep.ecml-archive', artifactUrl: undefined, body } });
+    const { container } = render(<EditorPreview ed={ed} context={mockContext} />);
+    const iframe = container.querySelector('iframe')!;
+    const initializePreview = vi.fn();
+    (iframe.contentWindow as unknown as { initializePreview: typeof initializePreview }).initializePreview = initializePreview;
+    fireEvent.load(iframe);
+    const cfg = initializePreview.mock.calls[0]![0] as { metadata: { body: string }; data: unknown };
+    const quiz = JSON.parse(cfg.metadata.body).theme.stage[0]['org.ekstep.questionset'][0];
+    expect(quiz['org.ekstep.question']).toHaveLength(1);
+    expect(JSON.parse(cfg.metadata.body)).toEqual(cfg.data);
+  });
+
+  it('passes ordinary content metadata through untouched (negative)', () => {
+    const ed = makeEd({ isDynamicAssess: false, content: mockContent });
+    const { container } = render(<EditorPreview ed={ed} context={mockContext} />);
+    const iframe = container.querySelector('iframe')!;
+    const initializePreview = vi.fn();
+    (iframe.contentWindow as unknown as { initializePreview: typeof initializePreview }).initializePreview = initializePreview;
+    fireEvent.load(iframe);
+    expect(initializePreview).toHaveBeenCalledWith(expect.objectContaining({ metadata: mockContent, data: {} }));
+  });
+
+  it('keeps passing empty data for regular ECML, so its preview loads exactly as before (negative)', () => {
+    const body = '{"theme":{"id":"theme","stage":[]}}';
+    const ed = makeEd({ isDynamicAssess: false, content: { ...mockContent, mimeType: 'application/vnd.ekstep.ecml-archive', body } });
+    const { container } = render(<EditorPreview ed={ed} context={mockContext} />);
+    const iframe = container.querySelector('iframe')!;
+    const initializePreview = vi.fn();
+    (iframe.contentWindow as unknown as { initializePreview: typeof initializePreview }).initializePreview = initializePreview;
+    fireEvent.load(iframe);
+    expect(initializePreview).toHaveBeenCalledWith(expect.objectContaining({ data: {} }));
+  });
+});
+
+describe('rendererData', () => {
+  it('parses a JSON-string body and passes an object body through (positive)', () => {
+    expect(rendererData('{"theme":{}}')).toEqual({ theme: {} });
+    expect(rendererData({ theme: {} })).toEqual({ theme: {} });
+  });
+
+  it('falls back to {} with no body, and keeps a non-JSON (XML) body as-is (negative)', () => {
+    expect(rendererData(undefined)).toEqual({});
+    expect(rendererData('')).toEqual({});
+    expect(rendererData('<theme></theme>')).toBe('<theme></theme>');
   });
 });

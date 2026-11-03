@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cascadedOptions, categoryTerms } from './taxonomy';
+import { cascadedOptions, categoryTerms, deepestCategoryCode } from './taxonomy';
 import type { FrameworkCategory } from './types';
 
 const categories: FrameworkCategory[] = [
@@ -53,5 +53,20 @@ describe('taxonomy', () => {
 
   it('categoryTerms lists every term', () => {
     expect(categoryTerms(categories, 'board').map((o) => o.name)).toEqual(['CBSE', 'ICSE']);
+  });
+});
+
+describe('deepestCategoryCode', () => {
+  it('picks the highest-index category regardless of array order or name (positive)', () => {
+    const cats = [
+      { code: 'topic', name: 'Topic', index: 3, terms: [] },
+      { code: 'board', name: 'Board', index: 1, terms: [] },
+      { code: 'subject', name: 'Subject', index: 2, terms: [] },
+    ] as FrameworkCategory[];
+    expect(deepestCategoryCode(cats)).toBe('topic');
+  });
+
+  it('is undefined before the framework has loaded (negative)', () => {
+    expect(deepestCategoryCode([])).toBeUndefined();
   });
 });
