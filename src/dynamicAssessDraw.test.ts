@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ecmlBodyForUser, pickForLearner, isGenerationStale, needsGeneration, selectedSkills, dynamicAssessSettings } from './dynamicAssessDraw';
+import { isGenerationStale, needsGeneration, selectedSkills, dynamicAssessSettings } from './dynamicAssessDraw';
 import { DYNAMIC_ASSESS_MIN_CRITERIA, DYNAMIC_ASSESS_POOL_MULTIPLIER } from './constants';
 
 const levels: Record<string, string> = { a1: 'EASY', a2: 'EASY', a3: 'EASY', b1: 'MEDIUM', b2: 'MEDIUM', b3: 'MEDIUM' };
@@ -9,28 +9,6 @@ const body = (dynamic: boolean) => ({
     data: { __cdata: JSON.stringify(Object.keys(levels).map((id) => ({ identifier: id, max_score: 1 }))) },
     'org.ekstep.question': Object.keys(levels).map((id) => ({ id })),
   }] }] },
-});
-const quizOf = (b: any) => b.theme.stage[0]['org.ekstep.questionset'][0];
-
-describe('ecmlBodyForUser', () => {
-  it("previews only the user's draw per level, matching the portal's seed (positive)", () => {
-    const out = ecmlBodyForUser(body(true), 'do_c', 'u1') as any;
-    const kept = quizOf(out)['org.ekstep.question'].map((q: any) => q.id);
-    expect(kept).toEqual(['a2', 'b3']); // literal ids, so a change to the draw or its count fails here
-    expect(JSON.parse(quizOf(out).config.__cdata).total_items).toBe(2);
-  });
-
-  it('does not mutate the original body', () => {
-    const original = body(true);
-    ecmlBodyForUser(original, 'do_c', 'u1');
-    expect(quizOf(original)['org.ekstep.question']).toHaveLength(6);
-  });
-
-  it('returns bodies without the dynamic block, and non-objects, unchanged (negative)', () => {
-    const plain = body(false);
-    expect(ecmlBodyForUser(plain, 'do_c', 'u1')).toBe(plain);
-    expect(ecmlBodyForUser({}, 'do_c', 'u1')).toEqual({});
-  });
 });
 
 describe('isGenerationStale', () => {
@@ -67,39 +45,6 @@ describe('isGenerationStale', () => {
     const stringTarget = generated({ skills: ['Physics'], target: '{"E":1,"M":1,"D":0}' });
     expect(isGenerationStale(stringTarget, { E: 1, M: 1, D: 0 }, ['Physics'])).toBe(false);
     expect(isGenerationStale(stringTarget, { E: 1, M: 2, D: 0 }, ['Physics'])).toBe(true);
-  });
-});
-
-describe('ecmlBodyForUser — fail closed and parity', () => {
-  const withTarget = (target: unknown) => ({
-    theme: { stage: [{ 'org.ekstep.questionset': [{
-      config: { __cdata: JSON.stringify({ dynamic_assess: { target, levels } }) },
-      data: { __cdata: JSON.stringify(Object.keys(levels).map((id) => ({ identifier: id, max_score: 1 }))) },
-      'org.ekstep.question': Object.keys(levels).map((id) => ({ id })),
-    }] }] },
-  });
-
-  it('draws nothing, never the pool, for a zero or unparseable target (positive)', () => {
-    expect(quizOf(ecmlBodyForUser(withTarget({ E: 0, M: 0, D: 0 }), 'do_c', 'u1'))['org.ekstep.question']).toEqual([]);
-    expect(quizOf(ecmlBodyForUser(withTarget('nope'), 'do_c', 'u1'))['org.ekstep.question']).toEqual([]);
-  });
-
-  it('caps each level at its generated size ÷ multiplier, so an undersized pool is never shown whole (positive)', () => {
-    // 3 per level with target 3: uncapped this returned all 6 unshuffled; at ×2 only floor(3/2) = 1 per level is drawn.
-    expect(quizOf(ecmlBodyForUser(withTarget({ E: 3, M: 3, D: 0 }), 'do_c', 'u1', 2))['org.ekstep.question'].map((q: any) => q.id)).toEqual(['a2', 'b3']);
-    expect(quizOf(ecmlBodyForUser(withTarget({ E: 3, M: 3, D: 0 }), 'do_c', 'u1', 3))['org.ekstep.question'].map((q: any) => q.id)).toEqual(['a2', 'b3']);
-  });
-
-  it('draws the full target when the pool holds target × multiplier (negative)', () => {
-    expect(quizOf(ecmlBodyForUser(withTarget({ E: 2, M: 0, D: 0 }), 'do_c', 'u1', 1))['org.ekstep.question'].map((q: any) => q.id)).toEqual(['a1', 'a2']);
-  });
-
-  it('accepts a JSON-string target like the portal does (positive)', () => {
-    expect(quizOf(ecmlBodyForUser(withTarget('{"E":1,"M":1,"D":0}'), 'do_c', 'u1'))['org.ekstep.question']).toHaveLength(2);
-  });
-
-  it('matches the golden vector shared with the portal and the QuestionSet editor', () => {
-    expect(pickForLearner(['q1', 'q2', 'q3', 'q4', 'q5', 'q6'], 2, 'user-1:do_123:EASY')).toEqual(['q6', 'q3']);
   });
 });
 

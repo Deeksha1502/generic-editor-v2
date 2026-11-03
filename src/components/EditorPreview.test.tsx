@@ -105,7 +105,7 @@ describe('<EditorPreview />', () => {
     expect(initializePreview).toHaveBeenCalledWith(expect.objectContaining({ data: { theme: { id: 'theme', stage: [] } } }));
   });
 
-  it('gives the renderer only the draw in metadata.body too, never the full pool (positive)', () => {
+  it('gives the renderer the whole Dynamic Assess pool, in data and metadata.body, so the creator and reviewer see every question (positive)', () => {
     const ids = ['a1', 'a2', 'a3'];
     const body = JSON.stringify({ theme: { stage: [{ 'org.ekstep.questionset': [{
       config: { __cdata: JSON.stringify({ dynamic_assess: { target: { E: 1, M: 0, D: 0 }, levels: Object.fromEntries(ids.map((id) => [id, 'EASY'])) } }) },
@@ -120,7 +120,8 @@ describe('<EditorPreview />', () => {
     fireEvent.load(iframe);
     const cfg = initializePreview.mock.calls[0]![0] as { metadata: { body: string }; data: unknown };
     const quiz = JSON.parse(cfg.metadata.body).theme.stage[0]['org.ekstep.questionset'][0];
-    expect(quiz['org.ekstep.question']).toHaveLength(1);
+    expect(quiz['org.ekstep.question']).toHaveLength(3);
+    expect(cfg.metadata.body).toBe(body);
     expect(JSON.parse(cfg.metadata.body)).toEqual(cfg.data);
   });
 

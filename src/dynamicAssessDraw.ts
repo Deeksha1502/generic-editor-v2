@@ -1,8 +1,7 @@
-// Same seeded draw as the portal's dynamicAssessSubset, so the preview shows the user the exact set they'd play; the full pool is never displayed.
+// Dynamic Assess pool settings and generation checks; the editor previews the whole pool, and learners get their own draw in the portal.
 
 import { DYNAMIC_ASSESS_MIN_CRITERIA, DYNAMIC_ASSESS_POOL_MULTIPLIER } from './constants';
 
-const LEVELS = [['E', 'EASY'], ['M', 'MEDIUM'], ['D', 'DIFFICULT']] as const;
 type Rec = Record<string, unknown>;
 
 /** The value as a plain object, or undefined; narrows parsed ECML before it is indexed. */
@@ -12,38 +11,6 @@ const asList = (v: unknown): unknown[] => (v == null ? [] : Array.isArray(v) ? v
 /** A quiz's parsed config.__cdata, or undefined when missing or unparseable. */
 function quizConfig(quiz: Rec | undefined): Rec | undefined {
   try { return asRec(JSON.parse(String(asRec(quiz?.config)?.__cdata ?? ''))); } catch { return undefined; }
-}
-
-function hashSeed(seed: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0;
-}
-
-function seededRandom(seed: string): () => number {
-  let a = hashSeed(seed);
-  return () => {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-export function pickForLearner(ids: string[], count: number, seed: string): string[] {
-  const pool = [...new Set(ids)].sort();
-  if (count >= pool.length) return pool;
-  const rand = seededRandom(seed);
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    const swap = pool[i] as string;
-    pool[i] = pool[j] as string;
-    pool[j] = swap;
-  }
-  return pool.slice(0, Math.max(0, count));
 }
 
 function parseBody(body: unknown): Rec | null {
@@ -105,46 +72,4 @@ export function needsGeneration(c: { primaryCategory?: string; dynamicSkills?: u
   // Another framework can keep the same skill names in a different category field, so its questions come from another pool; content saved without one isn't a switch.
   if (savedFramework && String(c.framework ?? '') !== String(savedFramework)) return true;
   return !(Number(c.totalQuestions ?? 0) > 0) || isGenerationStale(c.body, savedTarget, skills);
-}
-
-/** Trims each generated quiz in a parsed ECML body to this user's draw; bodies without the job's dynamic_assess block are returned unchanged. `multiplier` is the content's own (dynamicAssessSettings). */
-export function ecmlBodyForUser(body: unknown, contentId: string, userId: string | undefined, multiplier = DYNAMIC_ASSESS_POOL_MULTIPLIER): unknown {
-  if (!body || typeof body !== 'object') return body;
-  const theme = asRec((body as Rec).theme);
-  const stages = Array.isArray(theme?.stage) ? theme.stage : [];
-  if (!stages.some((s) => asRec(s)?.['org.ekstep.questionset'])) return body;
-  const copy = structuredClone(body) as Rec;
-  const perLevel = Math.max(1, Math.trunc(multiplier) || 1);
-  let changed = false;
-  for (const stage of (asRec(copy.theme)?.stage ?? []) as unknown[]) {
-    for (const quiz of asList(asRec(stage)?.['org.ekstep.questionset']).map(asRec)) {
-      const config = quizConfig(quiz);
-      const block = asRec(config?.dynamic_assess);
-      const questions = asList(quiz?.['org.ekstep.question']).map((q) => asRec(q) ?? {});
-      if (!quiz || !config || !block || questions.length === 0) continue;
-      // Fails closed like the portal: a missing, zero or unparseable target draws nothing rather than revealing the pool.
-      const target = parseTarget(block.target);
-      const levels = asRec(block.levels) ?? {};
-      const picked = new Set<string>();
-      for (const [key, level] of LEVELS) {
-        const atLevel = questions.map((q) => String(q.id)).filter((id) => String(levels[id] ?? '').toUpperCase() === level);
-        // Capped at what the job generated for this level, like the QuestionSet editor, so an undersized pool is never shown whole.
-        const count = Math.min(Number(target[key]) || 0, Math.floor(atLevel.length / perLevel));
-        pickForLearner(atLevel, count, `${userId || 'anonymous'}:${contentId}:${level}`).forEach((id) => picked.add(id));
-      }
-      const kept = questions.filter((q) => picked.has(String(q.id)));
-      if (kept.length === questions.length) continue;
-      let items: Rec[] = [];
-      const data = asRec(quiz.data);
-      try { items = asList(JSON.parse(String(data?.__cdata ?? '[]'))).map((i) => asRec(i) ?? {}); } catch { items = []; }
-      const keptItems = items.filter((item) => picked.has(String(item.identifier)));
-      quiz['org.ekstep.question'] = kept;
-      if (data) data.__cdata = JSON.stringify(keptItems);
-      config.total_items = kept.length;
-      config.max_score = keptItems.length ? keptItems.reduce((sum, item) => sum + (Number(item.max_score) || 1), 0) : kept.length;
-      (quiz.config as Rec).__cdata = JSON.stringify(config);
-      changed = true;
-    }
-  }
-  return changed ? copy : body;
 }

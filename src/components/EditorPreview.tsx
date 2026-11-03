@@ -4,7 +4,6 @@ import type { ContentData, EditorContext, RawTranscript } from '../types';
 import { getMimeTypeLabel, t } from '../i18n/i18n';
 import { FileIcon } from '../icons';
 import { isVideoMimeType } from '../constants';
-import { dynamicAssessSettings, ecmlBodyForUser } from '../dynamicAssessDraw';
 
 interface PlayerTranscript {
   language: string;
@@ -54,13 +53,9 @@ const RendererPreview: React.FC<{
       | (Window & { initializePreview?: (cfg: unknown) => void })
       | null;
     if (!win || typeof win.initializePreview !== 'function') return;
-    const rawBody = (content as Record<string, unknown>).body;
-    // Only Dynamic Assess renders from its generated body (the user's own draw, never the whole pool); other content keeps the renderer's own loading.
-    const data = isDynamicAssess ? ecmlBodyForUser(rendererData(rawBody), content.identifier, context.user?.id, dynamicAssessSettings(content as Record<string, unknown>).multiplier) : {};
-    // metadata.body carries the same draw, like the portal's ecmlForLearner, so the full pool never reaches the renderer.
-    const metadata = isDynamicAssess && rawBody
-      ? { ...content, body: typeof rawBody === 'string' && data && typeof data === 'object' ? JSON.stringify(data) : data }
-      : content;
+    // Only Dynamic Assess renders from its generated body: the whole pool, so the creator and reviewer see every question (learners get their own draw in the portal); other content keeps the renderer's own loading.
+    const data = isDynamicAssess ? rendererData((content as Record<string, unknown>).body) : {};
+    const metadata = content;
     win.initializePreview({
       context: {
         mode: 'edit',
